@@ -26,6 +26,30 @@
       "minutes": 1.2,
       "avg_score": 99.8,
       "spine_age": 23
+    },
+    {
+      "at": "2026-08-29T18:19:28",
+      "minutes": 11.5,
+      "avg_score": 77.0,
+      "spine_age": 36
+    },
+    {
+      "at": "2026-08-29T21:24:49",
+      "minutes": 5.7,
+      "avg_score": 97.7,
+      "spine_age": 22
+    },
+    {
+      "at": "2026-08-29T21:39:21",
+      "minutes": 8.5,
+      "avg_score": 76.2,
+      "spine_age": 38
+    },
+    {
+      "at": "2026-08-29T21:53:23",
+      "minutes": 6.8,
+      "avg_score": 80.0,
+      "spine_age": 34
     }
   ]
 }

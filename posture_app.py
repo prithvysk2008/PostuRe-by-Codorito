@@ -16,6 +16,7 @@ import io
 import json
 import math
 import os
+import random
 import time
 import wave as wave_lib
 from collections import deque
@@ -55,19 +56,23 @@ except Exception as exc:  # pragma: no cover
 # Deep slate blues, one periwinkle brand accent kept away from the status
 # palette so colour always means exactly one thing: how your spine is doing.
 # ============================================================================
-BG_0 = "#080B12"
-BG_1 = "#0D1320"
-SURFACE = "#121A29"
-SURFACE_2 = "#182234"
-LINE = "#233248"
-TEXT = "#E9EFF9"
-MUTED = "#7E8FA8"
-ACCENT = "#6E8BFF"
+# Direction: "Drafting Table" — a technical instrument reading a live
+# measurement, not a generic wellness dashboard. A real dark navy (not
+# near-black), one structural teal accent, and a construction-safety orange
+# for the WATCH state instead of a generic amber.
+BG_0 = "#0B1E33"      # --ink
+BG_1 = "#0E2743"
+SURFACE = "#12314F"   # --ink-2
+SURFACE_2 = "#173A5C"
+LINE = "#1F3F5E"
+TEXT = "#EAF3F2"       # --paper
+MUTED = "#7C97AA"      # --graphite
+ACCENT = "#4FD8C4"     # --drafting
 
-C_GOOD = "#35E6A6"
-C_WATCH = "#FFB547"
-C_BAD = "#FF5C7A"
-C_IDLE = "#6E8BFF"
+C_GOOD = "#35E6A6"     # kept exactly as-is: the quiet, low-attention state
+C_WATCH = "#FF8A3D"    # --hazard
+C_BAD = "#FF4757"      # --critical
+C_IDLE = "#4FD8C4"
 
 STATUS_COLORS = {"GOOD": C_GOOD, "WATCH": C_WATCH, "BAD": C_BAD, "IDLE": C_IDLE}
 STATUS_TEXT = {
@@ -111,25 +116,82 @@ class MetricSpec:
 
 METRICS: Dict[str, MetricSpec] = {
     # Vertical gap between ear-line and shoulder-line, in shoulder widths.
-    "neck": MetricSpec(0.28, "dec", 0.020, 0.115, "Lift the crown of your head — your neck is collapsing."),
-    # 2D craniovertebral angle (ear→shoulder vs horizontal).
-    "cva": MetricSpec(0.18, "dec", 2.0, 14.0, "Craniovertebral angle dropping — tuck your chin back."),
+    "neck": MetricSpec(0.26, "dec", 0.020, 0.115, "Lift the crown of your head — your neck is collapsing."),
+    # 2D craniovertebral angle (ear→shoulder vs horizontal). The clinical
+    # measure this app is framed around, so it carries the most weight and
+    # the tightest tolerance of any metric.
+    "cva": MetricSpec(0.28, "dec", 1.4, 8.0, "Craniovertebral angle dropping — tuck your chin back."),
     # Nose below the ear-line = looking down at the keyboard.
-    "pitch": MetricSpec(0.18, "inc", 0.025, 0.130, "Head tilted down — raise your screen to eye level."),
+    "pitch": MetricSpec(0.16, "inc", 0.025, 0.130, "Head tilted down — raise your screen to eye level."),
     # Shoulders sinking in the frame = sliding down the chair.
-    "drop": MetricSpec(0.14, "inc", 0.012, 0.070, "You're sinking into the chair — sit back into the backrest."),
+    "drop": MetricSpec(0.12, "inc", 0.012, 0.070, "You're sinking into the chair — sit back into the backrest."),
     # Face appears larger relative to shoulders = head craning toward screen.
-    "face": MetricSpec(0.14, "inc", 0.012, 0.070, "You're creeping toward the screen — push your chair in instead."),
+    "face": MetricSpec(0.12, "inc", 0.012, 0.070, "You're creeping toward the screen — push your chair in instead."),
     # Shoulder line rotated = leaning on one arm.
-    "tilt": MetricSpec(0.08, "abs", 2.5, 12.0, "One shoulder is dropping — even out your weight."),
+    "tilt": MetricSpec(0.06, "abs", 2.5, 12.0, "One shoulder is dropping — even out your weight."),
 }
 METRIC_KEYS = list(METRICS.keys())
 
+# Each entry: (name, target group, one-sentence instruction, icon key).
+# Grouped by what a desk/typing session actually strains.
 STRETCHES = [
-    ("Chin tucks", "Pull your chin straight back, hold 2s, release. Repeat slowly.", 10),
-    ("Shoulder rolls", "Roll both shoulders backward in big, slow circles.", 10),
-    ("Look far away", "Focus on the furthest thing you can see. Let your eyes reset.", 10),
+    # -- neck --
+    ("Chin tucks", "neck",
+     "Pull your chin straight back like you're making a double chin, hold, then release.", "chin_tuck"),
+    ("Neck side bend", "neck",
+     "Tilt one ear toward its shoulder until you feel a gentle stretch, then switch sides.", "neck_tilt"),
+    ("Neck rotation", "neck",
+     "Slowly turn your head to look over one shoulder, then the other.", "neck_rotate"),
+    ("Chin-to-chest stretch", "neck",
+     "Lower your chin toward your chest and feel the stretch down the back of your neck.", "chin_chest"),
+    # -- shoulders / upper back --
+    ("Shoulder rolls", "shoulders",
+     "Roll both shoulders backward in big, slow circles.", "shoulder_roll"),
+    ("Shoulder blade squeeze", "shoulders",
+     "Pull your shoulder blades together like you're pinching a pencil between them.", "blade_squeeze"),
+    ("Cross-body shoulder stretch", "shoulders",
+     "Pull one arm across your chest with the other hand, then switch sides.", "cross_arm"),
+    ("Upper back stretch", "shoulders",
+     "Clasp your hands, round your upper back, and push your hands away from you.", "back_round"),
+    ("Seated cat-cow", "shoulders",
+     "Arch and round your upper spine slowly while seated, following your breath.", "cat_cow"),
+    # -- eyes --
+    ("Look far away", "eyes",
+     "Focus on the furthest thing you can see and let your eyes reset.", "eye_far"),
+    ("20-20-20 blink reset", "eyes",
+     "Close your eyes gently for a count of five, then blink slowly ten times.", "eye_blink"),
+    ("Eye circles", "eyes",
+     "Without moving your head, roll your eyes slowly in a full circle, then reverse.", "eye_circle"),
+    # -- wrists --
+    ("Wrist flex & extend", "wrists",
+     "Straighten one arm and gently pull your fingers back, then push them down.", "wrist_flex"),
+    ("Wrist circles", "wrists",
+     "Rotate both wrists in slow circles, then reverse direction.", "wrist_circle"),
+    ("Finger spread & fist", "wrists",
+     "Spread your fingers as wide as you can, then close into a soft fist. Repeat.", "finger_fist"),
 ]
+
+
+def break_duration(interval_min: float) -> float:
+    """Break length scales with how long you've been sitting: a 5-minute
+    check-in only needs ~20s, a full hour (or more) earns a real ~90s+ reset.
+    """
+    slope = (90.0 - 20.0) / (60.0 - 5.0)
+    return float(max(20.0, 20.0 + (interval_min - 5.0) * slope))
+
+
+def pick_stretches(duration_s: float) -> List[Tuple[str, str, str, str]]:
+    """Randomised subset of STRETCHES sized to how long this break is."""
+    if duration_s < 35:
+        n = 1
+    elif duration_s < 55:
+        n = 2
+    elif duration_s < 75:
+        n = 3
+    else:
+        n = 4
+    n = min(n, len(STRETCHES))
+    return random.sample(STRETCHES, n)
 
 
 # ============================================================================
@@ -149,6 +211,44 @@ def hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
     h = hex_color.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return (b, g, r)
+
+
+def _gradient_canvas(w: int, h: int, top_hex: str, bot_hex: str) -> np.ndarray:
+    top = np.array(hex_to_bgr(top_hex), np.float32)
+    bot = np.array(hex_to_bgr(bot_hex), np.float32)
+    t = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None, None]
+    grad = top[None, None, :] * (1 - t) + bot[None, None, :] * t
+    return np.repeat(grad, w, axis=1).astype(np.uint8)
+
+
+def _add_corner_glow(card: np.ndarray, w: int, h: int, hex_color: str) -> None:
+    """A soft off-corner highlight so the card background reads as a real
+    treatment rather than a flat fill or a plain top-to-bottom gradient."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dist = np.sqrt((xx - w * 0.18) ** 2 + (yy - h * 0.03) ** 2) / (max(w, h) * 0.85)
+    glow = np.clip(1.0 - dist, 0.0, 1.0) ** 2
+    tint = np.array(hex_to_bgr(hex_color), np.float32)
+    add = glow[..., None] * tint[None, None, :] * 0.22
+    card[:] = np.clip(card.astype(np.float32) + add, 0, 255).astype(np.uint8)
+
+
+def _add_grid_texture(card: np.ndarray, spacing: int = 40, hex_color: str = "#7C97AA",
+                       alpha: float = 0.05) -> None:
+    """Faint blueprint/graph-paper ruling, matching the app's background texture."""
+    tint = np.array(hex_to_bgr(hex_color), np.float32)
+    card_f = card.astype(np.float32)
+    card_f[::spacing, :, :] = card_f[::spacing, :, :] * (1 - alpha) + tint * alpha
+    card_f[:, ::spacing, :] = card_f[:, ::spacing, :] * (1 - alpha) + tint * alpha
+    card[:] = np.clip(card_f, 0, 255).astype(np.uint8)
+
+
+def _gradient_bar(card: np.ndarray, x0: int, y0: int, x1: int, y1: int, hex_stops: List[str]) -> None:
+    n = max(x1 - x0, 1)
+    stops = np.array([hex_to_bgr(hx) for hx in hex_stops], dtype=np.float32)
+    xs = np.linspace(0, 1, len(stops))
+    t = np.linspace(0, 1, n)
+    bar = np.stack([np.interp(t, xs, stops[:, c]) for c in range(3)], axis=1).astype(np.uint8)
+    card[y0:y1, x0:x1] = bar[None, :, :]
 
 
 def fmt_clock(seconds: float) -> str:
@@ -176,13 +276,22 @@ def status_for(score: float) -> str:
 CSS = """
 <style>
 :root{
-  --bg0:#080B12; --bg1:#0D1320; --surface:#121A29; --surface2:#182234;
-  --line:#233248; --text:#E9EFF9; --muted:#7E8FA8; --accent:#6E8BFF;
+  /* -- Drafting Table: an engineering instrument reading a live measurement -- */
+  --ink:#0B1E33; --ink-2:#12314F; --paper:#EAF3F2; --graphite:#7C97AA;
+  --drafting:#4FD8C4; --hazard:#FF8A3D; --critical:#FF4757;
+  /* aliases so every rule below is wired to the new palette in one place */
+  --bg0:var(--ink); --bg1:#0E2743; --surface:var(--ink-2); --surface2:#173A5C;
+  --line:#1F3F5E; --text:var(--paper); --muted:var(--graphite); --accent:var(--drafting);
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", "Consolas", "Roboto Mono", monospace;
+  --grid: repeating-linear-gradient(0deg, rgba(124,151,170,.05) 0, rgba(124,151,170,.05) 1px, transparent 1px, transparent 40px),
+          repeating-linear-gradient(90deg, rgba(124,151,170,.05) 0, rgba(124,151,170,.05) 1px, transparent 1px, transparent 40px);
 }
 html, body, [data-testid="stAppViewContainer"]{
-  background: radial-gradient(1200px 700px at 20% -10%, #14203a 0%, var(--bg1) 45%, var(--bg0) 100%);
+  background:
+    var(--grid),
+    radial-gradient(1200px 700px at 20% -10%, #163256 0%, var(--bg1) 45%, var(--bg0) 100%);
+  background-color: var(--bg0);
   color: var(--text);
   font-family: var(--sans);
 }
@@ -192,10 +301,37 @@ html, body, [data-testid="stAppViewContainer"]{
 #MainMenu, footer{ visibility: hidden; }
 
 [data-testid="stSidebar"]{
-  background: linear-gradient(180deg, #0E1626 0%, #0A0F1A 100%);
+  background: linear-gradient(180deg, #0E2138 0%, #0A1929 100%);
   border-right: 1px solid var(--line);
 }
 [data-testid="stSidebar"] .stMarkdown p{ color: var(--muted); font-size: 0.86rem; }
+[data-testid="stWidgetLabel"] p{
+  font-family: var(--mono); font-size:.76rem; letter-spacing:.03em; color: var(--text);
+}
+[data-testid="stSidebar"] .stMarkdown p strong{
+  font-family: var(--mono); font-size:.68rem; letter-spacing:.16em; text-transform:uppercase;
+  color: var(--muted); font-weight:600;
+}
+[data-testid="stExpander"] summary{ font-family: var(--mono); font-size:.78rem; }
+
+/* the Streamlit theme's base font is monospace (so native chrome — buttons,
+   widget labels — reads as instrument-panel text); actual sentences inside
+   our own markdown blocks (coaching tips, tooltips, card body copy) opt back
+   into sans-serif here since they have no class of their own to hang a rule on. */
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] div:not([class]),
+[data-testid="stMarkdownContainer"] span:not([class]){
+  font-family: var(--sans);
+}
+
+/* ---------- corner registration marks — a few, not on everything ---------- */
+.pr-ticks{ position:relative; }
+.pr-ticks::before, .pr-ticks::after{
+  content:""; position:absolute; width:13px; height:13px; pointer-events:none;
+  border-color: var(--graphite); opacity:.5;
+}
+.pr-ticks::before{ top:9px; left:9px; border-top:2px solid; border-left:2px solid; }
+.pr-ticks::after{ bottom:9px; right:9px; border-bottom:2px solid; border-right:2px solid; }
 
 /* ---------- masthead ---------- */
 .pr-mast{ display:flex; align-items:flex-end; gap:18px; margin-bottom:6px; flex-wrap:wrap; }
@@ -218,28 +354,29 @@ html, body, [data-testid="stAppViewContainer"]{
 
 /* ---------- video stage ---------- */
 .pr-stage{
-  position: relative; border-radius: 20px; overflow: hidden;
-  border: 1px solid var(--line); background: #05070C;
+  position: relative; border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--grid), #04101F;
   transition: box-shadow .45s ease, border-color .45s ease;
 }
 .pr-stage img{ display:block; width:100%; height:auto; }
 .pr-badge{
-  position:absolute; top:14px; left:14px; padding:6px 14px; border-radius:999px;
+  position:absolute; top:14px; left:14px; padding:5px 13px; border-radius:3px;
   font-family: var(--mono); font-size:.68rem; letter-spacing:.18em; font-weight:600;
   border:1px solid; backdrop-filter: blur(8px);
 }
 .pr-fps{
   position:absolute; bottom:12px; right:14px; font-family:var(--mono); font-size:.62rem;
-  letter-spacing:.12em; color:rgba(233,239,249,.45); background:rgba(5,7,12,.45);
-  padding:3px 9px; border-radius:6px;
+  letter-spacing:.12em; color:rgba(234,243,242,.45); background:rgba(4,16,31,.55);
+  padding:3px 9px; border-radius:3px;
 }
 
 /* ---------- metric cards ---------- */
 .pr-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
 .pr-card{
-  background: linear-gradient(160deg, var(--surface2) 0%, var(--surface) 100%);
-  border:1px solid var(--line); border-radius:16px; padding:14px 16px;
-  box-shadow: 0 10px 26px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03);
+  background: var(--surface);
+  border:1px solid var(--line); border-radius:10px; padding:14px 16px;
+  box-shadow: 0 6px 16px rgba(0,0,0,.35);
 }
 .pr-card.wide{ grid-column: span 2; }
 .pr-label{
@@ -253,14 +390,14 @@ html, body, [data-testid="stAppViewContainer"]{
 .pr-value .u{ font-size:.85rem; font-weight:500; color:var(--muted); margin-left:4px; letter-spacing:0; }
 .pr-sub{ font-size:.74rem; color:var(--muted); margin-top:5px; line-height:1.35; }
 
-.pr-bar{ height:5px; border-radius:99px; background:#0A1120; margin-top:10px; overflow:hidden; }
-.pr-bar i{ display:block; height:100%; border-radius:99px; transition:width .35s ease; }
+.pr-bar{ height:5px; border-radius:2px; background:#081726; margin-top:10px; overflow:hidden; }
+.pr-bar i{ display:block; height:100%; border-radius:2px; transition:width .35s ease; }
 
-/* ---------- telemetry strip (the signature element) ---------- */
+/* ---------- telemetry strip (secondary readout — the gauge is the signature element) ---------- */
 .pr-strip{
-  background:linear-gradient(160deg,var(--surface2),var(--surface));
-  border:1px solid var(--line); border-radius:16px; padding:14px 16px 8px;
-  box-shadow:0 10px 26px rgba(0,0,0,.42);
+  background: var(--surface);
+  border:1px solid var(--line); border-radius:10px; padding:14px 16px 8px;
+  box-shadow:0 6px 16px rgba(0,0,0,.35);
 }
 .pr-strip svg{ display:block; width:100%; height:88px; }
 .pr-legend{
@@ -271,29 +408,29 @@ html, body, [data-testid="stAppViewContainer"]{
 
 /* ---------- coaching / alert banner ---------- */
 .pr-banner{
-  border-radius:14px; padding:13px 18px; border:1px solid; display:flex; gap:12px;
+  border-radius:8px; padding:13px 18px; border:1px solid; display:flex; gap:12px;
   align-items:center; font-size:.92rem; margin-bottom:12px;
 }
 .pr-banner .k{
   font-family:var(--mono); font-size:.6rem; letter-spacing:.2em; text-transform:uppercase;
-  padding:3px 9px; border-radius:6px; white-space:nowrap;
+  padding:3px 9px; border-radius:3px; white-space:nowrap;
 }
 
 /* ---------- stretch break overlay ---------- */
 .pr-break{
-  border-radius:20px; padding:26px 28px; text-align:center;
-  background:linear-gradient(160deg,#152B45,#0E1B2C);
-  border:1px solid #2B4568;
-  box-shadow:0 18px 50px rgba(0,0,0,.55);
+  border-radius:14px; padding:26px 28px; text-align:center;
+  background: var(--surface);
+  border:1px solid var(--line);
+  box-shadow:0 14px 40px rgba(0,0,0,.5);
 }
-.pr-break .n{ font-family:var(--mono); font-size:3.4rem; font-weight:700; color:#6E8BFF; line-height:1; }
-.pr-break h3{ margin:10px 0 4px; font-size:1.25rem; color:var(--text); }
-.pr-break p{ color:var(--muted); font-size:.92rem; margin:0; }
+.pr-break .n{ font-family:var(--mono); font-size:3.4rem; font-weight:700; color:var(--accent); line-height:1; }
+.pr-break h3{ margin:10px 0 4px; font-size:1.25rem; color:var(--text); font-family:var(--mono); font-weight:600; }
+.pr-break p{ color:var(--muted); font-size:.92rem; margin:0; font-family:var(--sans); }
 
 /* ---------- snapshot ---------- */
 .pr-snap{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
 .pr-snap figure{ margin:0; }
-.pr-snap img{ width:100%; border-radius:14px; border:1px solid var(--line); display:block; }
+.pr-snap img{ width:100%; border-radius:8px; border:1px solid var(--line); display:block; }
 .pr-snap figcaption{
   font-family:var(--mono); font-size:.6rem; letter-spacing:.18em; text-transform:uppercase;
   color:var(--muted); margin-top:8px;
@@ -301,9 +438,9 @@ html, body, [data-testid="stAppViewContainer"]{
 
 /* ---------- summary ---------- */
 .pr-hero{
-  background:linear-gradient(150deg,#16233A 0%,#0C131F 100%);
-  border:1px solid var(--line); border-radius:24px; padding:34px 32px;
-  box-shadow:0 20px 60px rgba(0,0,0,.5); text-align:center;
+  background: var(--surface);
+  border:1px solid var(--line); border-radius:14px; padding:34px 32px;
+  box-shadow:0 16px 46px rgba(0,0,0,.45); text-align:center;
 }
 .pr-hero .big{
   font-family:var(--mono); font-size:5.2rem; font-weight:700; line-height:1;
@@ -312,21 +449,148 @@ html, body, [data-testid="stAppViewContainer"]{
 .pr-hero .cap{
   font-family:var(--mono); font-size:.66rem; letter-spacing:.24em; text-transform:uppercase; color:var(--muted);
 }
-.pr-hero h2{ margin:12px 0 2px; font-size:1.5rem; }
+.pr-hero h2{
+  margin:12px 0 2px; font-size:1.3rem; font-family:var(--mono); font-weight:600;
+  letter-spacing:-.01em; color:var(--text);
+}
 
 /* ---------- buttons ---------- */
 .stButton > button{
-  width:100%; border-radius:12px; border:1px solid var(--line);
-  background:linear-gradient(160deg,var(--surface2),var(--surface)); color:var(--text);
-  font-weight:600; padding:.6rem 1rem; transition:all .18s ease;
+  width:100%; border-radius:6px; border:1px solid var(--line);
+  background: var(--surface); color:var(--text);
+  font-family: var(--mono); font-size:.82rem; letter-spacing:.04em; font-weight:600;
+  padding:.6rem 1rem; transition:all .18s ease;
 }
-.stButton > button:hover{ border-color:var(--accent); color:#fff; transform:translateY(-1px); }
+.stButton > button:hover{ border-color:var(--accent); color:var(--accent); transform:translateY(-1px); }
 .stButton > button[kind="primary"]{
-  background:linear-gradient(160deg,#6E8BFF,#4A63D8); border-color:#6E8BFF; color:#fff;
+  background:var(--accent); border-color:var(--accent); color:var(--ink);
 }
+.stButton > button[kind="primary"]:hover{ color:var(--ink); opacity:.9; }
 div[data-testid="stMetricValue"]{ font-family:var(--mono); }
+
+/* ---------- card label + tooltip ---------- */
+.pr-label-row{ display:flex; align-items:center; gap:5px; margin-bottom:6px; }
+.pr-label-row .pr-label{ margin-bottom:0; }
+.pr-tip{ position:relative; display:inline-flex; }
+.pr-tip-ic{
+  width:14px; height:14px; border-radius:50%; border:1px solid var(--muted);
+  color:var(--muted); font-family:var(--mono); font-size:.55rem; line-height:12px;
+  text-align:center; cursor:help; user-select:none;
+}
+.pr-tip-box{
+  visibility:hidden; opacity:0; position:absolute; bottom:130%; left:0; z-index:20;
+  width:220px; background:#081726; border:1px solid var(--line); border-radius:6px;
+  padding:9px 11px; font-size:.72rem; line-height:1.4; color:var(--text);
+  font-family:var(--sans); font-weight:400; letter-spacing:normal; text-transform:none;
+  box-shadow:0 12px 30px rgba(0,0,0,.5);
+}
+/* No transition: live stat tiles re-render their whole HTML block every
+   video frame, which recreates this node many times a second. A CSS
+   transition never gets to finish before the next replacement resets it,
+   so hovering during a live session shows nothing — an instant toggle
+   still reads as a stable tooltip since every frame paints it the same way. */
+.pr-tip:hover .pr-tip-box{ visibility:visible; opacity:1; }
+
+/* ---------- session history ---------- */
+.pr-hist-strip{
+  display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:14px;
+}
+.pr-hist-stat{
+  background: var(--surface); border:1px solid var(--line);
+  border-radius:8px; padding:12px 14px; text-align:center;
+}
+.pr-hist-stat b{
+  display:block; font-family:var(--mono); font-size:1.5rem; font-weight:700; color:var(--text);
+}
+.pr-hist-stat span{
+  font-size:.68rem; color:var(--muted); letter-spacing:.06em; text-transform:uppercase;
+}
+.pr-hist-row{
+  display:grid; grid-template-columns:104px 64px 1fr 44px 72px; align-items:center; gap:12px;
+  padding:9px 4px; border-bottom:1px solid var(--line);
+}
+.pr-hist-row:last-child{ border-bottom:none; }
+.pr-hist-date{ font-size:.82rem; color:var(--text); }
+.pr-hist-mins{ font-size:.74rem; color:var(--muted); }
+.pr-hist-bar{ height:5px; border-radius:2px; background:#081726; overflow:hidden; }
+.pr-hist-bar i{ display:block; height:100%; border-radius:2px; }
+.pr-hist-score{ font-family:var(--mono); font-weight:700; font-size:.86rem; text-align:right; }
+.pr-hist-age{ font-size:.68rem; color:var(--muted); text-align:right; }
+
+/* ---------- spine age explanation ---------- */
+.pr-explain{ font-size:.8rem; color:var(--muted); max-width:520px; margin:10px auto 0; line-height:1.5; }
+
+/* ---------- signature element: vertical measurement gauge ----------
+   A ruled tick-mark scale with a moving indicator, styled like an
+   engineering angle gauge / caliper readout. Appears live (CVA card) and
+   on the end-of-session summary (Spine Age), always in --drafting. */
+.pr-gauge{ display:inline-flex; align-items:center; gap:10px; }
+.pr-gauge-track{
+  position:relative; width:16px; border-radius:2px;
+  background:
+    repeating-linear-gradient(180deg, var(--graphite) 0, var(--graphite) 1px, transparent 1px, transparent 9px),
+    rgba(124,151,170,.07);
+  border:1px solid var(--line);
+}
+.pr-gauge-fill{
+  position:absolute; left:1px; right:1px; bottom:1px;
+  background:linear-gradient(180deg, var(--accent), rgba(79,216,196,.18));
+  border-radius:0 0 1px 1px;
+}
+.pr-gauge-marker{
+  position:absolute; left:-6px; width:28px; height:2px; background:var(--paper);
+  box-shadow:0 0 7px rgba(79,216,196,.85);
+}
+.pr-gauge-labels{
+  display:flex; flex-direction:column; justify-content:space-between;
+  font-family:var(--mono); font-size:.6rem; letter-spacing:.06em; color:var(--muted);
+}
+.pr-gauge-labels span:last-child{ align-self:flex-end; }
+
+/* ---------- stretch break icons + completion moment ---------- */
+.pr-stretch-fig{ width:110px; height:110px; margin:4px auto 0; display:block; }
+.pr-stretch-fig .part{ transform-box:fill-box; }
+@keyframes pr-tilt{
+  0%,100%{ transform:rotate(var(--r0,0deg)); }
+  50%{ transform:rotate(var(--r1,0deg)); }
+}
+@keyframes pr-slide{
+  0%,100%{ transform:translate(var(--x0,0px),var(--y0,0px)); }
+  50%{ transform:translate(var(--x1,0px),var(--y1,0px)); }
+}
+@keyframes pr-scale{
+  0%,100%{ transform:scale(var(--s0,1)); }
+  50%{ transform:scale(var(--s1,1)); }
+}
+@keyframes pr-spin{
+  from{ transform:rotate(0deg); }
+  to{ transform:rotate(360deg); }
+}
+@keyframes pr-check-pop{
+  0%{ transform:scale(0); opacity:0; }
+  60%{ transform:scale(1.15); opacity:1; }
+  100%{ transform:scale(1); opacity:1; }
+}
+.pr-check-mark{
+  display:inline-flex; align-items:center; gap:6px; margin-top:8px; padding:5px 12px;
+  border-radius:4px; background:rgba(53,230,166,.14); border:1px solid rgba(53,230,166,.4);
+  color:#35E6A6; font-family:var(--mono); font-size:.68rem; letter-spacing:.08em;
+  animation:pr-check-pop .5s ease-out;
+}
+.pr-check-glyph{ font-weight:700; }
+
+/* ---------- summary reveal ---------- */
+@keyframes pr-reveal{
+  0%{ opacity:0; transform:scale(.85) translateY(6px); }
+  100%{ opacity:1; transform:scale(1) translateY(0); }
+}
+.pr-hero .big{ animation:pr-reveal .6s cubic-bezier(.2,.8,.2,1) both; }
+
 @media (prefers-reduced-motion: reduce){
   .pr-ambient,.pr-stage,.pr-bar i{ transition:none !important; }
+  .pr-stretch-fig .part{ animation:none !important; }
+  .pr-check-mark{ animation:none !important; }
+  .pr-hero .big{ animation:none !important; }
 }
 </style>
 """
@@ -341,18 +605,23 @@ def inject_css() -> None:
 # No sound files to ship, nothing to download.
 # ============================================================================
 @st.cache_data(show_spinner=False)
-def make_chime(freqs: Tuple[float, ...], duration: float = 0.75, volume: float = 0.22) -> str:
-    """Return a base64 WAV of a soft, exponentially-decaying chord."""
+def make_chime(notes: Tuple[Tuple[float, float, float], ...], volume: float = 0.22,
+                decay: float = 3.2) -> str:
+    """Return a base64 WAV built from a short sequence of percussive notes.
+
+    Each note is (freq, start_offset_s, note_len_s) and gets its own fast
+    attack + exponential decay, so a multi-note phrase reads as distinct taps
+    or a falling run rather than one blurred chord.
+    """
     sr = 22050
-    t = np.linspace(0.0, duration, int(sr * duration), endpoint=False)
+    total = max(start + length for _, start, length in notes) + 0.12
+    t = np.linspace(0.0, total, int(sr * total), endpoint=False)
     tone = np.zeros_like(t)
-    for i, f in enumerate(freqs):
-        delay = i * 0.12
-        env = np.exp(-3.2 * np.maximum(t - delay, 0.0)) * (t >= delay)
-        tone += np.sin(2 * np.pi * f * (t - delay)) * env
-    # gentle attack so it never clicks
-    attack = np.minimum(t / 0.03, 1.0)
-    tone *= attack
+    for freq, start, length in notes:
+        local = t - start
+        env = np.exp(-decay * np.maximum(local, 0.0)) * (local >= 0.0)
+        attack = np.clip(local / 0.012, 0.0, 1.0)  # gentle attack so it never clicks
+        tone += np.sin(2 * np.pi * freq * local) * env * attack
     peak = float(np.max(np.abs(tone))) or 1.0
     audio = np.int16(np.clip(tone / peak * volume, -1, 1) * 32767)
 
@@ -365,17 +634,36 @@ def make_chime(freqs: Tuple[float, ...], duration: float = 0.75, volume: float =
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-CHIMES = {
-    "watch": (587.33, 493.88),                 # descending — "you're drifting"
-    "bad": (523.25, 440.00, 392.00),           # deeper fall — "you've slumped"
-    "predict": (659.25, 783.99),               # rising — "heads up, before it happens"
-    "break": (523.25, 659.25, 783.99),         # major triad — "time to move"
-    "recover": (783.99, 1046.50),              # bright — "nice save"
+# "watch"/"bad"/"predict" are short attention-grabbing phrases meant to cut
+# through background noise without a screen glance. "break"/"recover" stay
+# closer to a single soft, positive tone since they're not urgent.
+CHIME_SPECS = {
+    "watch": {  # falling two-note phrase — "you're drifting"
+        "notes": ((659.25, 0.00, 0.16), (523.25, 0.15, 0.24)),
+        "volume": 0.30, "decay": 9.0,
+    },
+    "bad": {  # firm falling run — "you've slumped"
+        "notes": ((587.33, 0.00, 0.14), (493.88, 0.14, 0.14), (392.00, 0.28, 0.32)),
+        "volume": 0.34, "decay": 10.0,
+    },
+    "predict": {  # two soft knocks then a rise — "heads up, before it happens"
+        "notes": ((659.25, 0.00, 0.13), (659.25, 0.16, 0.13), (783.99, 0.32, 0.26)),
+        "volume": 0.28, "decay": 9.5,
+    },
+    "break": {  # bright ascending triad — "time to move"
+        "notes": ((523.25, 0.00, 0.40), (659.25, 0.12, 0.40), (783.99, 0.24, 0.55)),
+        "volume": 0.20, "decay": 3.2,
+    },
+    "recover": {  # bright two-note lift — "nice save"
+        "notes": ((783.99, 0.00, 0.40), (1046.50, 0.12, 0.55)),
+        "volume": 0.20, "decay": 3.2,
+    },
 }
 
 
 def play_chime(placeholder, kind: str, token: int) -> None:
-    b64 = make_chime(CHIMES[kind])
+    spec = CHIME_SPECS[kind]
+    b64 = make_chime(spec["notes"], spec["volume"], spec["decay"])
     placeholder.markdown(
         f'<audio autoplay="true" data-k="{kind}-{token}">'
         f'<source src="data:audio/wav;base64,{b64}" type="audio/wav"></audio>',
@@ -450,7 +738,15 @@ def get_camera(index: int):
     """Keep one VideoCapture alive in session_state across Streamlit reruns."""
     cap = st.session_state.get("cap")
     if cap is not None and cap.isOpened():
-        return cap
+        if st.session_state.get("cap_index") == index:
+            return cap
+        # a different index was requested — release the old handle first
+        try:
+            cap.release()
+        except Exception:
+            pass
+        st.session_state.cap = None
+
     backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
     cap = cv2.VideoCapture(index, backend)
     if not cap.isOpened():  # retry with the default backend
@@ -463,6 +759,7 @@ def get_camera(index: int):
     except Exception:
         pass
     st.session_state.cap = cap
+    st.session_state.cap_index = index
     return cap
 
 
@@ -474,6 +771,7 @@ def release_camera() -> None:
         except Exception:
             pass
     st.session_state.cap = None
+    st.session_state.cap_index = None
 
 
 # ============================================================================
@@ -517,14 +815,26 @@ def extract_metrics(lms, w: int, h: int) -> Optional[dict]:
     eye_dist = float(np.linalg.norm(P(L_EYE_L) - P(L_EYE_R)))
 
     # Craniovertebral angle, 2D: angle between the shoulder→ear vector and the
-    # horizontal. Measured on whichever side the camera sees more clearly.
-    if V(L_EAR_L) >= V(L_EAR_R):
-        ear_pt, sh_pt = P(L_EAR_L), sh_l
-    else:
+    # horizontal. Averaged across both ears when both are clearly visible —
+    # using a single side flickers between frames as visibility scores jitter.
+    def _cva_for(ear_pt, sh_pt) -> float:
+        dx = abs(float(ear_pt[0] - sh_pt[0]))
+        dy = float(sh_pt[1] - ear_pt[1])
+        return math.degrees(math.atan2(dy, dx + 1e-6))
+
+    if V(L_EAR_L) > 0.3 and V(L_EAR_R) > 0.3:
+        ear_pt, sh_pt = P(L_EAR_L), sh_l  # used below only for the on-screen angle overlay
+        cva = (_cva_for(P(L_EAR_L), sh_l) + _cva_for(P(L_EAR_R), sh_r)) / 2.0
+    elif V(L_EAR_R) > 0.3:
         ear_pt, sh_pt = P(L_EAR_R), sh_r
-    dx = abs(float(ear_pt[0] - sh_pt[0]))
-    dy = float(sh_pt[1] - ear_pt[1])
-    cva = math.degrees(math.atan2(dy, dx + 1e-6))
+        cva = _cva_for(ear_pt, sh_pt)
+    elif V(L_EAR_L) > 0.3:
+        ear_pt, sh_pt = P(L_EAR_L), sh_l
+        cva = _cva_for(ear_pt, sh_pt)
+    else:
+        # neither ear is confidently visible — fall back to the eye midpoint
+        ear_pt, sh_pt = head, sh_mid
+        cva = _cva_for(ear_pt, sh_pt)
 
     dxs = float(sh_r[0] - sh_l[0])
     dys = float(sh_r[1] - sh_l[1])
@@ -545,7 +855,43 @@ def extract_metrics(lms, w: int, h: int) -> Optional[dict]:
         "_sh_l": sh_l, "_sh_r": sh_r, "_sh_mid": sh_mid,
         "_head": head, "_ear": ear_pt, "_ear_sh": sh_pt,
         "_shoulder_w": shoulder_w,
+        "_framing": frame_quality(lms, w, h),
     }
+
+
+def frame_quality(lms, w: int, h: int) -> Optional[str]:
+    """Flags framing that would make every downstream metric unreliable.
+
+    Every metric here is normalised by shoulder width, so bad framing doesn't
+    produce an obviously wrong score — it produces a quietly untrustworthy
+    one. Returns a short, specific fix, or None for a normally-framed shot.
+    """
+    def P(i):
+        return np.array([lms[i].x * w, lms[i].y * h], dtype=np.float64)
+
+    def V(i):
+        return lms[i].visibility
+
+    if V(L_SH_L) < 0.4 or V(L_SH_R) < 0.4:
+        return None  # extract_metrics already bails out on this case
+
+    sh_l, sh_r = P(L_SH_L), P(L_SH_R)
+    shoulder_w = float(np.linalg.norm(sh_l - sh_r))
+    frac = shoulder_w / w
+    top_y = min(sh_l[1], sh_r[1])
+    mid_y = (sh_l[1] + sh_r[1]) / 2.0
+
+    if frac < 0.16:
+        return "Move closer — your shoulders should fill about a third of the frame."
+    if frac > 0.65:
+        return "Move back a little — you're too close to the camera."
+    if sh_l[0] < 0.03 * w or sh_r[0] > 0.97 * w:
+        return "Center yourself in the frame — a shoulder is getting cut off."
+    if top_y < 0.10 * h:
+        return "Lower the camera a little — you're too near the top of the frame."
+    if mid_y > 0.92 * h:
+        return "Raise the camera a little — your shoulders are too low in the frame."
+    return None
 
 
 # --- Face Mesh: EAR / MAR -----------------------------------------------------
@@ -598,6 +944,7 @@ class PostureEngine:
         self._cand_n = 0
         self.parts: Dict[str, float] = {k: 0.0 for k in METRIC_KEYS}
         self.tip = ""
+        self.framing: Optional[str] = None
 
         self.history: deque = deque(maxlen=4000)      # (t, score)
         self.score_sum = 0.0
@@ -640,6 +987,8 @@ class PostureEngine:
         # breaks
         self.next_break: Optional[float] = None
         self.break_until: Optional[float] = None
+        self.break_total = 30.0
+        self.break_exercises: List[tuple] = []
         self.breaks_taken = 0
 
         # frames
@@ -895,13 +1244,19 @@ class PostureEngine:
                 return False
             return True
         if self.next_break is not None and now >= self.next_break:
-            self.break_until = now + 30.0
+            dur = break_duration(interval_min)
+            self.break_total = dur
+            self.break_exercises = pick_stretches(dur)
+            self.break_until = now + dur
             self._queue_chime("break", now, cooldown=0.0)
             return True
         return False
 
-    def start_break_now(self, now: float):
-        self.break_until = now + 30.0
+    def start_break_now(self, now: float, interval_min: float):
+        dur = break_duration(interval_min)
+        self.break_total = dur
+        self.break_exercises = pick_stretches(dur)
+        self.break_until = now + dur
         self._queue_chime("break", now, cooldown=0.0)
 
     # -- alerts --------------------------------------------------------------
@@ -1016,35 +1371,35 @@ def draw_frame_hud(frame, text: str, color_hex: str):
     if not text:
         return frame
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, h - 46), (w, h), (8, 11, 18), -1)
+    cv2.rectangle(overlay, (0, h - 46), (w, h), hex_to_bgr(BG_0), -1)
     cv2.addWeighted(overlay, 0.62, frame, 0.38, 0, frame)
     cv2.line(frame, (0, h - 46), (w, h - 46), hex_to_bgr(color_hex), 2, cv2.LINE_AA)
     cv2.putText(frame, text, (18, h - 17), cv2.FONT_HERSHEY_DUPLEX, 0.62,
-                (233, 239, 249), 1, cv2.LINE_AA)
+                hex_to_bgr(TEXT), 1, cv2.LINE_AA)
     return frame
 
 
 def draw_calibration_ui(frame, phase: str, progress: float):
     h, w = frame.shape[:2]
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, h), (8, 11, 18), -1)
+    cv2.rectangle(overlay, (0, 0), (w, h), hex_to_bgr(BG_0), -1)
     cv2.addWeighted(overlay, 0.42, frame, 0.58, 0, frame)
 
     cx, cy, r = w // 2, h // 2, int(min(w, h) * 0.20)
-    cv2.circle(frame, (cx, cy), r, (40, 55, 80), 4, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), r, hex_to_bgr(LINE), 4, cv2.LINE_AA)
     cv2.ellipse(frame, (cx, cy), (r, r), -90, 0, 360 * clamp(progress, 0, 1),
                 hex_to_bgr(ACCENT), 6, cv2.LINE_AA)
 
     if phase == "warmup":
         big, small = "GET SET", "Sit tall. Shoulders down. Eyes on the screen."
     else:
-        big, small = f"{max(0, int(CAL_CAPTURE_S * (1 - progress)) + 1)}", "Hold your best posture — this becomes your baseline."
+        big, small = f"{max(0, int(CAL_CAPTURE_S * (1 - progress)) + 1)}", "Hold your best posture - this becomes your baseline."
     (tw, th), _ = cv2.getTextSize(big, cv2.FONT_HERSHEY_DUPLEX, 1.5, 2)
     cv2.putText(frame, big, (cx - tw // 2, cy + th // 2), cv2.FONT_HERSHEY_DUPLEX,
-                1.5, (233, 239, 249), 2, cv2.LINE_AA)
+                1.5, hex_to_bgr(TEXT), 2, cv2.LINE_AA)
     (sw, _), _ = cv2.getTextSize(small, cv2.FONT_HERSHEY_DUPLEX, 0.62, 1)
     cv2.putText(frame, small, (cx - sw // 2, cy + r + 46), cv2.FONT_HERSHEY_DUPLEX,
-                0.62, (126, 143, 168), 1, cv2.LINE_AA)
+                0.62, hex_to_bgr(MUTED), 1, cv2.LINE_AA)
     return frame
 
 
@@ -1057,62 +1412,151 @@ def to_b64_jpeg(frame_bgr, quality: int = 82) -> str:
 
 # ============================================================================
 # SHARE CARD — built with OpenCV so there are no font files to ship.
+# Three styles: a minimal card, a data-rich card, and a tall 9:16 story card.
+# Pure OpenCV drawing (no HTML/Pillow render step) — this keeps the card
+# generator on the same locked, offline stack as the rest of the app. Every
+# element's position is derived from a running layout cursor rather than
+# fixed coordinates, so nothing overlaps regardless of style or text length.
 # ============================================================================
-def build_share_card(engine: PostureEngine, minutes: float) -> bytes:
-    W = H = 1080
-    card = np.zeros((H, W, 3), dtype=np.uint8)
-    top, bot = np.array(hex_to_bgr("#16233A"), np.float32), np.array(hex_to_bgr("#080B12"), np.float32)
-    for y in range(H):
-        card[y, :] = top + (bot - top) * (y / H)
+STYLE_LABELS = {"minimal": "Minimal", "data": "Data-rich", "story": "Story (9:16)"}
 
+
+def _share_badge(engine: PostureEngine, total_t: float) -> str:
+    if engine.recoveries >= 3:
+        return "RECOVERY STREAK"
+    if engine.best_streak_s >= 300:
+        return "LONGEST ALIGNED STRETCH"
+    if engine.time_in.get("GOOD", 0.0) / total_t >= 0.8:
+        return "MOSTLY ALIGNED"
+    if engine.breaks_taken >= 3:
+        return "BREAK TAKER"
+    return "SESSION LOGGED"
+
+
+def _share_compare(prev_sessions: list, avg: float, age: int) -> str:
+    if not prev_sessions:
+        return "First session logged"
+    prev_best_avg = max(p["avg_score"] for p in prev_sessions)
+    prev_best_age = min(p["spine_age"] for p in prev_sessions)
+    if avg > prev_best_avg + 0.5:
+        return f"Beat your best avg score by {avg - prev_best_avg:.0f} points"
+    if age < prev_best_age:
+        return f"New best spine age - {prev_best_age - age} years younger than before"
+    return f"Best avg score so far: {prev_best_avg:.0f}"
+
+
+def build_share_card(engine: PostureEngine, minutes: float, prev_sessions: list,
+                      day_streak: int, style: str = "minimal") -> bytes:
     age, label, note = engine.spine_age()
     avg = engine.avg_score()
-    color = hex_to_bgr(C_GOOD if age <= 30 else C_WATCH if age <= 46 else C_BAD)
+    total_t = sum(engine.time_in.values()) or 1.0
+    age_color = hex_to_bgr(C_GOOD if age <= 30 else C_WATCH if age <= 46 else C_BAD)
+    badge = _share_badge(engine, total_t)
+    compare = _share_compare(prev_sessions, avg, age)
 
-    def text(s, x, y, scale, col, thick=1, font=cv2.FONT_HERSHEY_DUPLEX, center=False):
+    tall = style == "story"
+    W, H = 1080, (1920 if tall else 1080)
+    pad = 74
+    # "story" gets extra breathing room so the tall format doesn't feel empty;
+    # "data" packs a hero + gauge + stat grid into one square, so it needs the
+    # opposite treatment or the grid runs off the bottom edge into the footer.
+    sp = 1.5 if tall else (0.82 if style == "data" else 1.0)
+
+    card = _gradient_canvas(W, H, SURFACE_2, BG_0)
+    _add_corner_glow(card, W, H, ACCENT)
+    _add_grid_texture(card, spacing=44, hex_color=MUTED, alpha=0.045)
+
+    def text_w(s, scale, thick=1, font=cv2.FONT_HERSHEY_DUPLEX):
+        return cv2.getTextSize(s, font, scale, thick)[0][0]
+
+    def fit_scale(s, max_w, scale, thick=1, min_scale=0.34):
+        while scale > min_scale and text_w(s, scale, thick) > max_w:
+            scale -= 0.02
+        return scale
+
+    def text(s, x, y, scale, col, thick=1, center=False, font=cv2.FONT_HERSHEY_DUPLEX):
         if center:
-            (tw, _), _ = cv2.getTextSize(s, font, scale, thick)
-            x = x - tw // 2
+            x = x - text_w(s, scale, thick, font) // 2
         cv2.putText(card, s, (int(x), int(y)), font, scale, col, thick, cv2.LINE_AA)
 
-    text("POSTURE:", 80, 110, 1.3, (233, 239, 249), 2)
-    cv2.line(card, (80, 145), (1000, 145), hex_to_bgr(LINE), 2)
-    text("SPINE AGE", W // 2, 300, 0.9, hex_to_bgr(MUTED), 1, center=True)
+    y = 0
+    # -- masthead --
+    y += int(96 * sp)
+    text("POSTURE:", pad, y, 1.05, hex_to_bgr(TEXT), 2)
+    y += 26
+    cv2.line(card, (pad, y), (W - pad, y), hex_to_bgr(LINE), 2)
+    y += int(74 * sp)
 
+    # -- spine age hero --
+    text("SPINE AGE", W // 2, y, 0.82, hex_to_bgr(MUTED), 1, center=True)
+    y += int(40 * sp)
     big = str(age)
-    (bw, bh), _ = cv2.getTextSize(big, cv2.FONT_HERSHEY_DUPLEX, 9.0, 14)
-    cv2.putText(card, big, (W // 2 - bw // 2, 300 + bh + 60), cv2.FONT_HERSHEY_DUPLEX,
-                9.0, color, 14, cv2.LINE_AA)
-    text(label.upper(), W // 2, 560, 1.4, (233, 239, 249), 2, center=True)
+    big_scale, big_thick = (6.6, 11) if style == "data" else (8.4, 13)
+    (bw, bh), _ = cv2.getTextSize(big, cv2.FONT_HERSHEY_DUPLEX, big_scale, big_thick)
+    y += bh
+    cv2.putText(card, big, (W // 2 - bw // 2, y), cv2.FONT_HERSHEY_DUPLEX, big_scale,
+                age_color, big_thick, cv2.LINE_AA)
+    y += int(62 * sp)
+    text(label.upper(), W // 2, y, 1.05, hex_to_bgr(TEXT), 2, center=True)
+    y += int(40 * sp)
+    tagline = "A wear score for this session, not a literal age - lower is always better."
+    text(tagline, W // 2, y, fit_scale(tagline, W - 2 * pad, 0.6), hex_to_bgr(MUTED), 1, center=True)
+    y += int(56 * sp)
 
-    words, line, lines = note.split(), "", []
-    for wd in words:
-        t = (line + " " + wd).strip()
-        if cv2.getTextSize(t, cv2.FONT_HERSHEY_DUPLEX, 0.75, 1)[0][0] > 820:
-            lines.append(line)
-            line = wd
-        else:
-            line = t
-    lines.append(line)
-    for i, ln in enumerate(lines[:3]):
-        text(ln, W // 2, 615 + i * 38, 0.75, hex_to_bgr(MUTED), 1, center=True)
+    # -- best-to-worst scale with a marker for this session --
+    gx0, gx1 = pad + 10, W - pad - 10
+    _gradient_bar(card, gx0, y, gx1, y + 14, [C_GOOD, C_WATCH, C_BAD])
+    age_pct = clamp((age - 18) / (79 - 18), 0.0, 1.0)
+    mx = int(gx0 + age_pct * (gx1 - gx0))
+    tri = np.array([[mx - 11, y - 16], [mx + 11, y - 16], [mx, y - 1]], np.int32)
+    cv2.fillPoly(card, [tri], hex_to_bgr(TEXT))
+    y += 14 + 34
+    text("BEST - 18", gx0, y, 0.5, hex_to_bgr(MUTED), 1)
+    worst_label = "WORST - 79"
+    ww = text_w(worst_label, 0.5, 1)
+    text(worst_label, gx1 - ww, y, 0.5, hex_to_bgr(MUTED), 1)
+    y += int(60 * sp)
 
-    stats = [
-        ("AVG SCORE", f"{avg:.0f}"),
-        ("SESSION", fmt_clock(minutes * 60)),
-        ("BEST STREAK", fmt_clock(engine.best_streak_s)),
-        ("SAVES", str(engine.recoveries)),
-    ]
-    x0, y0, bw2, bh2, gap = 80, 760, 220, 150, 20
-    for i, (k, v) in enumerate(stats):
-        x = x0 + i * (bw2 + gap)
-        cv2.rectangle(card, (x, y0), (x + bw2, y0 + bh2), hex_to_bgr(SURFACE), -1)
-        cv2.rectangle(card, (x, y0), (x + bw2, y0 + bh2), hex_to_bgr(LINE), 1)
-        text(k, x + bw2 // 2, y0 + 45, 0.55, hex_to_bgr(MUTED), 1, center=True)
-        text(v, x + bw2 // 2, y0 + 108, 1.5, (233, 239, 249), 2, center=True)
+    # -- achievement badge + comparison vs your own history + day streak --
+    badge_scale = fit_scale(badge, W - 2 * pad - 44, 0.62, thick=2)
+    bw2 = text_w(badge, badge_scale, 2)
+    cv2.rectangle(card, (W // 2 - bw2 // 2 - 22, y - 34), (W // 2 + bw2 // 2 + 22, y + 10),
+                  hex_to_bgr(C_GOOD), 2)
+    text(badge, W // 2, y, badge_scale, hex_to_bgr(C_GOOD), 2, center=True)
+    y += int(52 * sp)
+    text(compare, W // 2, y, fit_scale(compare, W - 2 * pad, 0.62), hex_to_bgr(TEXT), 1, center=True)
+    y += int(40 * sp)
+    streak_line = f"{day_streak} day streak" if day_streak else "First day logged"
+    text(streak_line, W // 2, y, 0.56, hex_to_bgr(MUTED), 1, center=True)
+    y += int(50 * sp)
 
-    text("100% on-device  ·  nothing left this laptop", W // 2, 1010, 0.68,
+    # -- stat grid: skipped for "minimal", shown for "data" and "story" --
+    if style != "minimal":
+        stats = [
+            ("AVG SCORE", f"{avg:.0f}"),
+            ("SESSION", fmt_clock(minutes * 60)),
+            ("BEST STREAK", fmt_clock(engine.best_streak_s)),
+            ("SAVES", str(engine.recoveries)),
+        ]
+        cols, rows = 2, 2
+        gap, cell_h = (int(22 * sp), int(150 * sp))
+        cell_w = (W - 2 * pad - gap) // cols
+        for i, (k, v) in enumerate(stats):
+            r, c = divmod(i, cols)
+            x0, y0 = pad + c * (cell_w + gap), y + r * (cell_h + gap)
+            cv2.rectangle(card, (x0, y0), (x0 + cell_w, y0 + cell_h), hex_to_bgr(SURFACE), -1)
+            cv2.rectangle(card, (x0, y0), (x0 + cell_w, y0 + cell_h), hex_to_bgr(LINE), 1)
+            text(k, x0 + cell_w // 2, y0 + 46, 0.52, hex_to_bgr(MUTED), 1, center=True)
+            text(v, x0 + cell_w // 2, y0 + int(cell_h * 0.72),
+                 fit_scale(v, cell_w - 30, 1.3), hex_to_bgr(TEXT), 2, center=True)
+
+    # -- footer: trust line centered, subtle wordmark watermark in the corner --
+    foot_y = H - 60
+    text("100% on-device - nothing leaves this laptop", W // 2, foot_y, 0.54,
          hex_to_bgr(MUTED), 1, center=True)
+    wm = "POSTURE:"
+    text(wm, W - pad - text_w(wm, 0.46, 1), H - 26, 0.46, hex_to_bgr("#3F5170"), 1)
+
     ok, buf = cv2.imencode(".png", card)
     return buf.tobytes() if ok else b""
 
@@ -1126,7 +1570,7 @@ def render_video(ph, b64: str, color_hex: str, status: str, fps: float):
     glow = hex_to_rgba(color_hex, 0.42)
     inner = hex_to_rgba(color_hex, 0.10)
     ph.markdown(
-        f'<div class="pr-stage" style="border-color:{hex_to_rgba(color_hex,0.55)};'
+        f'<div class="pr-stage pr-ticks" style="border-color:{hex_to_rgba(color_hex,0.55)};'
         f'box-shadow:0 0 0 1px {hex_to_rgba(color_hex,0.55)}, 0 0 48px {glow}, inset 0 0 70px {inner};">'
         f'<img src="data:image/jpeg;base64,{b64}"/>'
         f'<div class="pr-badge" style="background:{hex_to_rgba(color_hex,0.14)};color:{color_hex};'
@@ -1148,16 +1592,50 @@ def render_ambient(ph, color_hex: str, intensity: float):
     )
 
 
-def _card(label, value, unit, sub, color, bar=None, wide=False):
+TIPS = {
+    "posture": "How closely you're matching the posture you calibrated at the start of this "
+               "session. 80-100 aligned, 60-79 drifting, below 60 slouched.",
+    "fatigue": "Estimated from eye closure, blink rate and yawning. Fresh below 25, Mild "
+               "25-49, Drowsy 50-74, Critical 75 and up.",
+    "streak": "How long you've held aligned (80+) posture in a row. A quick slip is forgiven "
+              "if you fix it within 12 seconds — that counts as a recovery save.",
+    "trend": "Where your score has been heading over the last 45 seconds, not just this "
+             "instant. A fast enough fall triggers an early heads-up before you actually slouch.",
+    "cva": "Craniovertebral angle — the angle between your ear and shoulder versus horizontal. "
+           "The clinical marker for forward-head posture; a smaller angle means more forward lean.",
+    "next_break": "Countdown to your next scheduled stretch break. Break length scales with how "
+                  "long you sit between breaks, so longer gaps earn longer resets.",
+}
+
+
+def render_gauge(pct: float, top_label: str, bottom_label: str, height: int = 84) -> str:
+    """The signature 'drafting table' element: a ruled vertical scale with a
+    moving indicator, like an engineering angle gauge. `pct` is 0..1, where 1
+    fills the gauge to the top. Reused live (CVA card) and in the summary
+    (Spine Age) so it's the one visual motif that repeats across the app."""
+    pct = clamp(pct, 0.0, 1.0)
+    fill_h = pct * height
+    return (
+        f'<div class="pr-gauge"><div class="pr-gauge-track" style="height:{height}px">'
+        f'<div class="pr-gauge-fill" style="height:{fill_h:.0f}px"></div>'
+        f'<div class="pr-gauge-marker" style="bottom:{fill_h:.0f}px"></div>'
+        f'</div><div class="pr-gauge-labels" style="height:{height}px">'
+        f'<span>{top_label}</span><span>{bottom_label}</span></div></div>'
+    )
+
+
+def _card(label, value, unit, sub, color, bar=None, wide=False, tip=None, extra=""):
     bar_html = ""
     if bar is not None:
         bar_html = (f'<div class="pr-bar"><i style="width:{clamp(bar,0,1)*100:.0f}%;'
                     f'background:{color}"></i></div>')
     u = f'<span class="u">{unit}</span>' if unit else ""
+    tip_html = (f'<span class="pr-tip"><span class="pr-tip-ic">?</span>'
+               f'<span class="pr-tip-box">{tip}</span></span>') if tip else ""
     return (f'<div class="pr-card{" wide" if wide else ""}">'
-            f'<div class="pr-label">{label}</div>'
+            f'<div class="pr-label-row"><div class="pr-label">{label}</div>{tip_html}</div>'
             f'<div class="pr-value" style="color:{color}">{value}{u}</div>'
-            f'<div class="pr-sub">{sub}</div>{bar_html}</div>')
+            f'<div class="pr-sub">{sub}</div>{bar_html}{extra}</div>')
 
 
 def render_cards(ph, e: PostureEngine, now: float, daily_streak: int, perclos: float):
@@ -1192,13 +1670,21 @@ def render_cards(ph, e: PostureEngine, now: float, daily_streak: int, perclos: f
 
     html = '<div class="pr-grid">'
     html += _card("Posture score", f"{e.score:.0f}", "/100",
-                  STATUS_TEXT.get(e.status, ""), color, bar=e.score / 100.0)
-    html += _card("Fatigue", e.fatigue_label.upper(), "", fat_sub, fat_c, bar=e.fatigue / 100.0)
-    html += _card("Streak", fmt_clock(e.streak_s), "", streak_sub, C_GOOD if e.streak_s > 0 else MUTED)
-    html += _card("Trend", tr_v, "", tr_s, tr_c)
+                  STATUS_TEXT.get(e.status, ""), color, bar=e.score / 100.0, tip=TIPS["posture"])
+    html += _card("Fatigue", e.fatigue_label.upper(), "", fat_sub, fat_c, bar=e.fatigue / 100.0,
+                  tip=TIPS["fatigue"])
+    html += _card("Streak", fmt_clock(e.streak_s), "", streak_sub,
+                  C_GOOD if e.streak_s > 0 else MUTED, tip=TIPS["streak"])
+    html += _card("Trend", tr_v, "", tr_s, tr_c, tip=TIPS["trend"])
+    cva_gauge = ""
+    if e.metrics_ema:
+        cva_pct = (clamp(e.metrics_ema["cva"], 30.0, 60.0) - 30.0) / 30.0
+        cva_gauge = f'<div style="margin-top:10px">{render_gauge(cva_pct, "60°", "30°", height=64)}</div>'
     html += _card("CVA", f"{e.metrics_ema['cva']:.0f}" if e.metrics_ema else "—", "°",
-                  f"Baseline {e.baseline['cva']:.0f}°" if e.baseline else "Not calibrated", ACCENT)
-    html += _card("Next break", nb, "", f"{e.breaks_taken} taken · day streak {daily_streak}", ACCENT)
+                  f"Baseline {e.baseline['cva']:.0f}°" if e.baseline else "Not calibrated", ACCENT,
+                  tip=TIPS["cva"], extra=cva_gauge)
+    html += _card("Next break", nb, "", f"{e.breaks_taken} taken · day streak {daily_streak}",
+                  ACCENT, tip=TIPS["next_break"])
     html += "</div>"
     ph.markdown(html, unsafe_allow_html=True)
 
@@ -1247,7 +1733,9 @@ def render_banner(ph, e: PostureEngine):
     if e.break_until:
         ph.empty()
         return
-    if e.status == "IDLE":
+    if e.framing:
+        k, msg, c = "FRAMING", e.framing, C_WATCH
+    elif e.status == "IDLE":
         k, msg, c = "NO SUBJECT", "Step back into frame — I can't see your shoulders.", MUTED
     elif e.predicting and e.status != "BAD":
         k, msg, c = "PREDICTED", (f"You're drifting. At this rate you'll be slouching in "
@@ -1261,23 +1749,155 @@ def render_banner(ph, e: PostureEngine):
     ph.markdown(
         f'<div class="pr-banner" style="background:{hex_to_rgba(c,0.08)};border-color:{hex_to_rgba(c,0.35)}">'
         f'<span class="k" style="background:{hex_to_rgba(c,0.16)};color:{c}">{k}</span>'
-        f'<span style="color:#E9EFF9">{msg}</span></div>',
+        f'<span style="color:{TEXT}">{msg}</span></div>',
         unsafe_allow_html=True,
     )
+
+
+def _humanoid_svg(part_style: str) -> str:
+    return (f'<svg class="pr-stretch-fig" viewBox="0 0 120 120">'
+            f'<line x1="30" y1="82" x2="90" y2="82" stroke="{MUTED}" stroke-width="6" stroke-linecap="round"/>'
+            f'<g class="part" style="{part_style}">'
+            f'<circle cx="60" cy="50" r="20" fill="none" stroke="{ACCENT}" stroke-width="6"/>'
+            f'<line x1="60" y1="70" x2="60" y2="82" stroke="{ACCENT}" stroke-width="6"/>'
+            f'</g></svg>')
+
+
+def _shoulders_svg(part_style: str) -> str:
+    return (f'<svg class="pr-stretch-fig" viewBox="0 0 120 120">'
+            f'<circle cx="60" cy="38" r="14" fill="none" stroke="{MUTED}" stroke-width="5"/>'
+            f'<g class="part" style="{part_style}">'
+            f'<line x1="25" y1="70" x2="95" y2="70" stroke="{ACCENT}" stroke-width="7" stroke-linecap="round"/>'
+            f'</g></svg>')
+
+
+def _eye_svg(part_style: str) -> str:
+    return (f'<svg class="pr-stretch-fig" viewBox="0 0 120 120">'
+            f'<path d="M20,60 Q60,30 100,60 Q60,90 20,60 Z" fill="none" stroke="{MUTED}" stroke-width="4"/>'
+            f'<circle class="part" cx="60" cy="60" r="12" fill="{ACCENT}" style="{part_style}"/>'
+            f'</svg>')
+
+
+def _hand_svg(part_style: str) -> str:
+    return (f'<svg class="pr-stretch-fig" viewBox="0 0 120 120">'
+            f'<line x1="20" y1="60" x2="70" y2="60" stroke="{MUTED}" stroke-width="6" stroke-linecap="round"/>'
+            f'<g class="part" style="{part_style}">'
+            f'<circle cx="85" cy="60" r="16" fill="none" stroke="{ACCENT}" stroke-width="6"/>'
+            f'<line x1="95" y1="50" x2="105" y2="42" stroke="{ACCENT}" stroke-width="5" stroke-linecap="round"/>'
+            f'</g></svg>')
+
+
+_STRETCH_SVG_BUILDERS = {"head": _humanoid_svg, "shoulders": _shoulders_svg,
+                          "eye": _eye_svg, "hand": _hand_svg}
+
+# Every icon reuses one of four simple, iconographic shapes; each exercise
+# gets its own motion via CSS custom properties on a shared set of keyframes
+# (see pr-tilt / pr-slide / pr-scale / pr-spin in the stylesheet).
+STRETCH_ANIM = {
+    "chin_tuck":    ("head", "animation:pr-slide 2s ease-in-out infinite; --x0:0px; --x1:-14px; --y0:0px; --y1:0px;"),
+    "neck_tilt":    ("head", "animation:pr-tilt 2.4s ease-in-out infinite; --r0:-16deg; --r1:16deg; transform-origin:60px 82px;"),
+    "neck_rotate":  ("head", "animation:pr-tilt 2.6s ease-in-out infinite; --r0:-28deg; --r1:28deg; transform-origin:60px 82px;"),
+    "chin_chest":   ("head", "animation:pr-slide 2.2s ease-in-out infinite; --y0:0px; --y1:14px; --x0:0px; --x1:0px;"),
+    "shoulder_roll":("shoulders", "animation:pr-spin 2.4s linear infinite; transform-origin:60px 70px;"),
+    "blade_squeeze":("shoulders", "animation:pr-scale 2s ease-in-out infinite; --s0:1; --s1:0.7; transform-origin:60px 70px;"),
+    "cross_arm":    ("hand", "animation:pr-tilt 2.2s ease-in-out infinite; --r0:-10deg; --r1:35deg; transform-origin:70px 60px;"),
+    "back_round":   ("shoulders", "animation:pr-scale 2.4s ease-in-out infinite; --s0:1; --s1:1.18; transform-origin:60px 70px;"),
+    "cat_cow":      ("shoulders", "animation:pr-slide 2.6s ease-in-out infinite; --y0:-6px; --y1:6px; --x0:0px; --x1:0px;"),
+    "eye_far":      ("eye", "animation:pr-scale 2.2s ease-in-out infinite; --s0:1; --s1:0.4; transform-origin:60px 60px;"),
+    "eye_blink":    ("eye", "animation:pr-scale 1.6s ease-in-out infinite; --s0:1; --s1:0.15; transform-origin:60px 60px;"),
+    "eye_circle":   ("eye", "animation:pr-spin 2.4s linear infinite; transform-origin:60px 60px;"),
+    "wrist_flex":   ("hand", "animation:pr-tilt 2s ease-in-out infinite; --r0:-20deg; --r1:20deg; transform-origin:85px 60px;"),
+    "wrist_circle": ("hand", "animation:pr-spin 2s linear infinite; transform-origin:85px 60px;"),
+    "finger_fist":  ("hand", "animation:pr-scale 1.8s ease-in-out infinite; --s0:1; --s1:0.6; transform-origin:85px 60px;"),
+}
+
+
+def render_stretch_icon(svg_key: str) -> str:
+    family, style = STRETCH_ANIM.get(svg_key, ("head", ""))
+    return _STRETCH_SVG_BUILDERS[family](style)
 
 
 def render_break(ph, e: PostureEngine, now: float):
+    total = max(e.break_total, 1.0)
     left = max(0.0, (e.break_until or now) - now)
-    elapsed = 30.0 - left
-    idx = min(int(elapsed // 10), len(STRETCHES) - 1)
-    name, how, _ = STRETCHES[idx]
+    elapsed = clamp(total - left, 0.0, total)
+
+    items = e.break_exercises or [STRETCHES[0]]
+    n = len(items)
+    seg = total / n
+    idx = min(int(elapsed // seg), n - 1)
+    into = elapsed - idx * seg
+    name, group, how, svg_key = items[idx]
+
+    check_html = ""
+    if idx > 0 and into < 0.6:
+        prev_name = items[idx - 1][0]
+        check_html = (f'<div class="pr-check-mark"><span class="pr-check-glyph">&#10003;</span> '
+                      f'{prev_name} done</div>')
+
     ph.markdown(
         f'<div class="pr-break"><div class="n">{int(left)+1}</div>'
+        f'{render_stretch_icon(svg_key)}'
         f"<h3>{name}</h3><p>{how}</p>"
+        f'{check_html}'
         f'<p style="margin-top:10px;font-size:.72rem;letter-spacing:.18em;color:#4E5F78">'
-        f"MOVE {idx+1} OF {len(STRETCHES)} · SCORING PAUSED</p></div>",
+        f"MOVE {idx+1} OF {n} · {group.upper()} · SCORING PAUSED</p></div>",
         unsafe_allow_html=True,
     )
+
+
+def friendly_date(iso_str: str) -> str:
+    try:
+        d = datetime.fromisoformat(iso_str).date()
+    except Exception:
+        return iso_str.split("T")[0]
+    delta = (date.today() - d).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Yesterday"
+    if 2 <= delta <= 6:
+        return d.strftime("%A")
+    return f"{d.strftime('%b')} {d.day}"
+
+
+def score_color(score: float) -> str:
+    return STATUS_COLORS[status_for(score)]
+
+
+def render_history(store: dict) -> None:
+    sessions = store.get("sessions", [])
+    if not sessions:
+        return
+    best_avg = max(s["avg_score"] for s in sessions)
+    best_age = min(s["spine_age"] for s in sessions)
+
+    st.markdown(
+        '<div class="pr-label" style="margin:22px 0 8px">SESSION HISTORY · STORED ON THIS MACHINE ONLY</div>',
+        unsafe_allow_html=True,
+    )
+    strip = (
+        '<div class="pr-hist-strip">'
+        f'<div class="pr-hist-stat"><b>{len(sessions)}</b><span>Sessions</span></div>'
+        f'<div class="pr-hist-stat"><b>{best_avg:.0f}</b><span>Best avg score</span></div>'
+        f'<div class="pr-hist-stat"><b>{best_age}</b><span>Best spine age</span></div>'
+        f'<div class="pr-hist-stat"><b>{store.get("daily_streak",0)}</b><span>Day streak</span></div>'
+        '</div>'
+    )
+    rows = []
+    for s in reversed(sessions[-8:]):
+        c = score_color(s["avg_score"])
+        rows.append(
+            '<div class="pr-hist-row">'
+            f'<div class="pr-hist-date">{friendly_date(s["at"])}</div>'
+            f'<div class="pr-hist-mins">{s["minutes"]:.0f} min</div>'
+            f'<div class="pr-hist-bar"><i style="width:{clamp(s["avg_score"],0,100):.0f}%;'
+            f'background:{c}"></i></div>'
+            f'<div class="pr-hist-score" style="color:{c}">{s["avg_score"]:.0f}</div>'
+            f'<div class="pr-hist-age">age {s["spine_age"]}</div>'
+            '</div>'
+        )
+    st.markdown(strip + "".join(rows), unsafe_allow_html=True)
 
 
 def render_snapshot(ph, e: PostureEngine):
@@ -1315,8 +1935,10 @@ def init_state():
     ss.setdefault("running", False)
     ss.setdefault("summary", None)
     ss.setdefault("cap", None)
+    ss.setdefault("cap_index", None)
     ss.setdefault("store", load_store())
-    ss.setdefault("share_png", None)
+    ss.setdefault("share_pngs", {})
+    ss.setdefault("share_style", "minimal")
 
 
 def start_session():
@@ -1324,7 +1946,7 @@ def start_session():
     e.hard_reset()
     e.session_start = time.time()
     st.session_state.summary = None
-    st.session_state.share_png = None
+    st.session_state.share_pngs = {}
     st.session_state.running = True
 
 
@@ -1335,6 +1957,17 @@ def stop_session():
     if e.session_start and e.score_n > 3:
         dur = time.time() - e.session_start
         age, label, note = e.spine_age()
+        prev_sessions = list(ss.store.get("sessions", []))  # history *before* this session is added
+        if dur >= 60:
+            ss.store = register_day(ss.store)
+            ss.store.setdefault("sessions", []).append({
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "minutes": round(dur / 60, 1),
+                "avg_score": round(e.avg_score(), 1),
+                "spine_age": age,
+            })
+            ss.store["sessions"] = ss.store["sessions"][-60:]
+            save_store(ss.store)
         ss.summary = {
             "duration": dur,
             "avg": e.avg_score(),
@@ -1350,17 +1983,9 @@ def stop_session():
             "breaks": e.breaks_taken,
             "baseline_jpg": e.baseline_jpg,
             "current_jpg": e.current_jpg,
+            "prev_sessions": prev_sessions,
+            "day_streak": ss.store.get("daily_streak", 0),
         }
-        if dur >= 60:
-            ss.store = register_day(ss.store)
-            ss.store.setdefault("sessions", []).append({
-                "at": datetime.now().isoformat(timespec="seconds"),
-                "minutes": round(dur / 60, 1),
-                "avg_score": round(e.avg_score(), 1),
-                "spine_age": age,
-            })
-            ss.store["sessions"] = ss.store["sessions"][-60:]
-            save_store(ss.store)
     release_camera()
 
 
@@ -1372,10 +1997,10 @@ def sidebar() -> dict:
     ss = st.session_state
     sb = st.sidebar
     sb.markdown(
-        '<div style="font-family:ui-monospace,monospace;font-size:1.5rem;font-weight:700;'
-        'letter-spacing:-.03em;color:#E9EFF9">POSTU<span style="color:#6E8BFF">Re:</span></div>'
-        '<div style="font-family:ui-monospace,monospace;font-size:.6rem;letter-spacing:.22em;'
-        'color:#7E8FA8;margin:4px 0 14px">SPINE TELEMETRY · OFFLINE</div>',
+        f'<div style="font-family:ui-monospace,monospace;font-size:1.5rem;font-weight:700;'
+        f'letter-spacing:-.03em;color:{TEXT}">POSTU<span style="color:{ACCENT}">Re:</span></div>'
+        f'<div style="font-family:ui-monospace,monospace;font-size:.6rem;letter-spacing:.22em;'
+        f'color:{MUTED};margin:4px 0 14px">SPINE TELEMETRY · OFFLINE</div>',
         unsafe_allow_html=True,
     )
 
@@ -1388,8 +2013,9 @@ def sidebar() -> dict:
     sb.markdown("---")
     sb.markdown("**Coaching**")
     sensitivity = sb.slider("Sensitivity", 0.6, 1.8, 1.0, 0.1,
-                            help="Higher means smaller deviations from your baseline cost you points.")
-    break_min = sb.slider("Stretch break every (min)", 5, 45, 20, 1)
+                            help="Higher = stricter scoring, so even small slips cost you points. "
+                                 "Lower = more forgiving, so only real slouching counts.")
+    break_min = sb.slider("Stretch break every (min)", 5, 90, 20, 1)
 
     sb.markdown("**Feedback**")
     ambient = sb.checkbox("Ambient screen glow", True)
@@ -1411,9 +2037,9 @@ def sidebar() -> dict:
     sb.markdown("---")
     sb.markdown(
         f'<div class="pr-label">DAY STREAK</div>'
-        f'<div style="font-family:ui-monospace,monospace;font-size:1.8rem;font-weight:700;color:#35E6A6">'
-        f'{store.get("daily_streak",0)}<span style="font-size:.8rem;color:#7E8FA8"> days</span></div>'
-        f'<div style="font-size:.72rem;color:#7E8FA8">Best {store.get("best_streak",0)} · '
+        f'<div style="font-family:ui-monospace,monospace;font-size:1.8rem;font-weight:700;color:{C_GOOD}">'
+        f'{store.get("daily_streak",0)}<span style="font-size:.8rem;color:{MUTED}"> days</span></div>'
+        f'<div style="font-size:.72rem;color:{MUTED}">Best {store.get("best_streak",0)} · '
         f'{len(store.get("sessions",[]))} sessions logged locally</div>',
         unsafe_allow_html=True,
     )
@@ -1510,6 +2136,7 @@ def run_session(cfg: dict):
             now = time.time()
             lms = res.pose_landmarks.landmark if res.pose_landmarks else None
             m = extract_metrics(lms, w, h) if lms else None
+            e.framing = m["_framing"] if m else None
             disp = frame.copy()
 
             # ---------------- calibration ----------------
@@ -1534,15 +2161,15 @@ def run_session(cfg: dict):
                             cv2.resize(snap, (460, int(h * 460 / w))), 78)
                         e.schedule_breaks(now, cfg["break_min"])
                     else:
-                        cal_fail_msg = "Couldn't see your shoulders clearly — restarting calibration."
+                        cal_fail_msg = "Couldn't see your shoulders clearly - restarting calibration."
                         e.reset_calibration()
 
                 banner_ph.markdown(
-                    '<div class="pr-banner" style="background:rgba(110,139,255,.08);'
-                    'border-color:rgba(110,139,255,.35)">'
-                    '<span class="k" style="background:rgba(110,139,255,.16);color:#6E8BFF">CALIBRATING</span>'
-                    '<span style="color:#E9EFF9">Sit the way you want to sit for the next hour. '
-                    'Everything after this is measured against this exact posture.</span></div>',
+                    f'<div class="pr-banner" style="background:{hex_to_rgba(ACCENT,0.08)};'
+                    f'border-color:{hex_to_rgba(ACCENT,0.35)}">'
+                    f'<span class="k" style="background:{hex_to_rgba(ACCENT,0.16)};color:{ACCENT}">CALIBRATING</span>'
+                    f'<span style="color:{TEXT}">Sit the way you want to sit for the next hour. '
+                    f'Everything after this is measured against this exact posture.</span></div>',
                     unsafe_allow_html=True,
                 )
                 cards_ph.empty()
@@ -1563,9 +2190,9 @@ def run_session(cfg: dict):
 
                 if on_break:
                     ov = disp.copy()
-                    cv2.rectangle(ov, (0, 0), (w, h), (8, 11, 18), -1)
+                    cv2.rectangle(ov, (0, 0), (w, h), hex_to_bgr(BG_0), -1)
                     cv2.addWeighted(ov, 0.55, disp, 0.45, 0, disp)
-                    draw_frame_hud(disp, "STRETCH BREAK · scoring paused", ACCENT)
+                    draw_frame_hud(disp, "STRETCH BREAK - scoring paused", ACCENT)
                     render_break(break_ph, e, now)
                 else:
                     break_ph.empty()
@@ -1583,7 +2210,7 @@ def run_session(cfg: dict):
             render_video(video_ph, b64, color, status, fps)
 
             if cfg["ambient"]:
-                intensity = {"GOOD": 0.12, "WATCH": 0.55, "BAD": 1.0}.get(e.status, 0.0)
+                intensity = {"GOOD": 0.12, "WATCH": 0.80, "BAD": 1.45}.get(e.status, 0.0)
                 if not e.calibrated:
                     intensity = 0.25
                 key = (color, int(intensity * 10))
@@ -1620,10 +2247,10 @@ def run_session(cfg: dict):
 def render_idle():
     store = st.session_state.store
     st.markdown(
-        '<div class="pr-banner" style="background:rgba(110,139,255,.08);border-color:rgba(110,139,255,.35)">'
-        '<span class="k" style="background:rgba(110,139,255,.16);color:#6E8BFF">READY</span>'
-        '<span style="color:#E9EFF9">Press <b>Start session</b> in the sidebar. '
-        'Five seconds of calibration, then the coaching is live.</span></div>',
+        f'<div class="pr-banner" style="background:{hex_to_rgba(ACCENT,0.08)};border-color:{hex_to_rgba(ACCENT,0.35)}">'
+        f'<span class="k" style="background:{hex_to_rgba(ACCENT,0.16)};color:{ACCENT}">READY</span>'
+        f'<span style="color:{TEXT}">Press <b>Start session</b> in the sidebar. '
+        f'Five seconds of calibration, then the coaching is live.</span></div>',
         unsafe_allow_html=True,
     )
     c1, c2, c3 = st.columns(3, gap="large")
@@ -1641,38 +2268,32 @@ def render_idle():
     for col, title, body in blocks:
         with col:
             st.markdown(
-                f'<div class="pr-card" style="height:100%"><div class="pr-label">{title}</div>'
-                f'<div style="color:#E9EFF9;font-size:.92rem;line-height:1.5;margin-top:6px">{body}</div></div>',
+                f'<div class="pr-card pr-ticks" style="height:100%"><div class="pr-label">{title}</div>'
+                f'<div style="color:{TEXT};font-size:.92rem;line-height:1.5;margin-top:6px">{body}</div></div>',
                 unsafe_allow_html=True,
             )
 
     st.markdown('<div style="height:22px"></div>', unsafe_allow_html=True)
-    sessions = store.get("sessions", [])
-    if sessions:
-        st.markdown('<div class="pr-label">RECENT SESSIONS · STORED ON THIS MACHINE ONLY</div>',
-                    unsafe_allow_html=True)
-        rows = "".join(
-            f'<tr><td style="padding:7px 14px 7px 0;color:#7E8FA8">{s["at"].replace("T"," ")}</td>'
-            f'<td style="padding:7px 14px 7px 0">{s["minutes"]} min</td>'
-            f'<td style="padding:7px 14px 7px 0">avg {s["avg_score"]}</td>'
-            f'<td style="padding:7px 0;color:#6E8BFF">spine age {s["spine_age"]}</td></tr>'
-            for s in reversed(sessions[-6:])
-        )
-        st.markdown(
-            f'<table style="font-family:ui-monospace,monospace;font-size:.78rem;color:#E9EFF9;'
-            f'border-collapse:collapse">{rows}</table>',
-            unsafe_allow_html=True,
-        )
+    render_history(store)
 
 
 def render_summary(s: dict):
     ss = st.session_state
     age_color = C_GOOD if s["age"] <= 30 else C_WATCH if s["age"] <= 46 else C_BAD
+    # gauge fills upward for a *better* (lower) age — best sits at the top
+    age_pct = 1.0 - clamp((s["age"] - 18) / (79 - 18), 0.0, 1.0)
+    gauge = render_gauge(age_pct, "BEST · 18", "WORST · 79", height=110)
     st.markdown(
-        f'<div class="pr-hero"><div class="cap">SPINE AGE</div>'
+        f'<div class="pr-hero pr-ticks"><div class="cap">SPINE AGE</div>'
         f'<div class="big" style="color:{age_color}">{s["age"]}</div>'
         f'<h2>{s["label"]}</h2>'
-        f'<p style="color:#7E8FA8;max-width:620px;margin:8px auto 0">{s["note"]}</p></div>',
+        f'<p style="color:var(--graphite);max-width:620px;margin:8px auto 0">{s["note"]}</p>'
+        f'<p class="pr-explain">This isn\'t a literal age prediction — it\'s a wear score for '
+        f'this one session, where lower is always better. Even a genuinely perfect session lands '
+        f'in the low-to-mid 20s, so a young, healthy person seeing a number around there means '
+        f'they did almost everything right, not that something is wrong.</p>'
+        f'<div style="margin-top:20px;display:flex;justify-content:center">{gauge}</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
     st.markdown('<div style="height:18px"></div>', unsafe_allow_html=True)
@@ -1706,17 +2327,29 @@ def render_summary(s: dict):
             unsafe_allow_html=True,
         )
 
-    st.markdown('<div style="height:20px"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="pr-label" style="margin:26px 0 8px">SHARE CARD</div>', unsafe_allow_html=True)
+    style = st.radio("Share card style", list(STYLE_LABELS.keys()),
+                     format_func=lambda k: STYLE_LABELS[k], horizontal=True,
+                     key="share_style", label_visibility="collapsed")
+
+    if style not in ss.share_pngs:
+        try:
+            ss.share_pngs[style] = build_share_card(
+                ss.engine, s["duration"] / 60.0,
+                s.get("prev_sessions", []), s.get("day_streak", 0), style,
+            )
+        except Exception:
+            ss.share_pngs[style] = b""
+    png = ss.share_pngs.get(style, b"")
+
     c1, c2 = st.columns([1, 1])
     with c1:
-        if ss.share_png is None:
-            try:
-                ss.share_png = build_share_card(ss.engine, s["duration"] / 60.0)
-            except Exception:
-                ss.share_png = b""
-        if ss.share_png:
-            st.download_button("Download share card", ss.share_png,
-                               file_name=f"posture-spine-age-{s['age']}.png", mime="image/png")
+        if png:
+            st.image(png, width=260 if style == "story" else 340)
+            st.download_button("Download share card", png,
+                               file_name=f"posture-spine-age-{s['age']}-{style}.png", mime="image/png")
+        else:
+            st.info("Couldn't render the share card for this session.")
     with c2:
         st.button("Start another session", type="primary", on_click=start_session)
 

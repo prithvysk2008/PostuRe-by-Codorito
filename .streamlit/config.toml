@@ -1,0 +1,12 @@
+# PostuRe: — "Drafting Table" theme.
+# Sliders, checkboxes, radio buttons and other native widget chrome are drawn
+# by Streamlit itself and can't be reached with page CSS — this is the
+# supported way to recolor them to match the app's palette (see posture_app.py
+# CSS block for the same tokens: --ink, --ink-2, --paper, --drafting).
+[theme]
+base = "dark"
+primaryColor = "#4FD8C4"
+backgroundColor = "#0B1E33"
+secondaryBackgroundColor = "#12314F"
+textColor = "#EAF3F2"
+font = "monospace"
