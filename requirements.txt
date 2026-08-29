@@ -1,0 +1,7 @@
+# PostuRe: — pinned for reproducibility. These exact versions work together.
+# Python 3.10 or 3.11 recommended (MediaPipe supports 3.9-3.12).
+streamlit==1.38.0
+mediapipe==0.10.14
+opencv-python==4.10.0.84
+numpy==1.26.4
+protobuf==4.25.3

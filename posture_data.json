@@ -1,0 +1,31 @@
+{
+  "last_date": "2026-08-29",
+  "daily_streak": 1,
+  "best_streak": 1,
+  "sessions": [
+    {
+      "at": "2026-08-29T12:18:18",
+      "minutes": 10.6,
+      "avg_score": 80.5,
+      "spine_age": 35
+    },
+    {
+      "at": "2026-08-29T12:53:42",
+      "minutes": 22.5,
+      "avg_score": 79.4,
+      "spine_age": 35
+    },
+    {
+      "at": "2026-08-29T14:21:03",
+      "minutes": 2.6,
+      "avg_score": 89.1,
+      "spine_age": 29
+    },
+    {
+      "at": "2026-08-29T14:24:01",
+      "minutes": 1.2,
+      "avg_score": 99.8,
+      "spine_age": 23
+    }
+  ]
+}
