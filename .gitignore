@@ -1,2 +1,11 @@
 .venv/
-_pycache_/
+__pycache__/
+
+# Electron app: dependencies and build output, regenerated via
+# npm install / npm run build:frontend / npm run build:backend / npm run dist:mac
+desktop/node_modules/
+desktop/dist/
+desktop/backend/dist/
+desktop/backend/build/
+
+.DS_Store

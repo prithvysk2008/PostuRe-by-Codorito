@@ -1,7 +1,7 @@
 {
-  "last_date": "2026-08-29",
-  "daily_streak": 1,
-  "best_streak": 1,
+  "last_date": "2026-08-30",
+  "daily_streak": 2,
+  "best_streak": 2,
   "sessions": [
     {
       "at": "2026-08-29T12:18:18",
@@ -50,6 +50,42 @@
       "minutes": 6.8,
       "avg_score": 80.0,
       "spine_age": 34
+    },
+    {
+      "at": "2026-08-29T22:59:22",
+      "minutes": 5.9,
+      "avg_score": 87.1,
+      "spine_age": 28
+    },
+    {
+      "at": "2026-08-30T01:40:34",
+      "minutes": 2.4,
+      "avg_score": 87.8,
+      "spine_age": 30
+    },
+    {
+      "at": "2026-08-30T02:38:27",
+      "minutes": 1.7,
+      "avg_score": 87.8,
+      "spine_age": 30
+    },
+    {
+      "at": "2026-08-30T02:51:04",
+      "minutes": 1.8,
+      "avg_score": 80.1,
+      "spine_age": 35
+    },
+    {
+      "at": "2026-08-30T02:53:43",
+      "minutes": 2.4,
+      "avg_score": 73.7,
+      "spine_age": 43
+    },
+    {
+      "at": "2026-08-30T03:35:07",
+      "minutes": 2.1,
+      "avg_score": 87.0,
+      "spine_age": 30
     }
   ]
 }

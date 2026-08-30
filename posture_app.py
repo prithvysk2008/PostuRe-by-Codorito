@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import math
 import os
 import random
+import sqlite3
 import time
 import wave as wave_lib
 from collections import deque
@@ -95,7 +95,8 @@ CAL_WARMUP_S = 2.0
 CAL_CAPTURE_S = 5.0
 CAL_MIN_SAMPLES = 22
 
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "posture_data.json")
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "posture_data.db")
+SESSION_HISTORY_LIMIT = 60
 
 
 # ============================================================================
@@ -116,17 +117,24 @@ class MetricSpec:
 
 METRICS: Dict[str, MetricSpec] = {
     # Vertical gap between ear-line and shoulder-line, in shoulder widths.
-    "neck": MetricSpec(0.26, "dec", 0.020, 0.115, "Lift the crown of your head — your neck is collapsing."),
+    "neck": MetricSpec(0.20, "dec", 0.020, 0.115, "Lift the crown of your head — your neck is collapsing."),
     # 2D craniovertebral angle (ear→shoulder vs horizontal). The clinical
-    # measure this app is framed around, so it carries the most weight and
-    # the tightest tolerance of any metric.
-    "cva": MetricSpec(0.28, "dec", 1.4, 8.0, "Craniovertebral angle dropping — tuck your chin back."),
+    # measure this app is framed around, so it stays weighted highly, but not
+    # so highly it drowns out every other signal.
+    "cva": MetricSpec(0.22, "dec", 1.4, 8.0, "Craniovertebral angle dropping — tuck your chin back."),
+    # Vertical gap between the shoulder-line and the tip of the nose — a
+    # second, independent read on forward-head collapse anchored at the
+    # shoulders rather than the ears, so it catches a chin-to-chest droop
+    # that "neck" alone can miss.
+    "chin": MetricSpec(0.12, "dec", 0.020, 0.115, "Your chin is dropping toward your chest — lift your head."),
     # Nose below the ear-line = looking down at the keyboard.
-    "pitch": MetricSpec(0.16, "inc", 0.025, 0.130, "Head tilted down — raise your screen to eye level."),
-    # Shoulders sinking in the frame = sliding down the chair.
-    "drop": MetricSpec(0.12, "inc", 0.012, 0.070, "You're sinking into the chair — sit back into the backrest."),
+    "pitch": MetricSpec(0.16, "inc", 0.020, 0.110, "Head tilted down — raise your screen to eye level."),
+    # Shoulders sinking relative to shoulder width = sliding down the chair.
+    # Normalised by shoulder width (not frame height) so it stays equally
+    # sensitive regardless of how far you're sitting from the camera.
+    "drop": MetricSpec(0.14, "inc", 0.05, 0.22, "You're sinking into the chair — sit back into the backrest."),
     # Face appears larger relative to shoulders = head craning toward screen.
-    "face": MetricSpec(0.12, "inc", 0.012, 0.070, "You're creeping toward the screen — push your chair in instead."),
+    "face": MetricSpec(0.10, "inc", 0.012, 0.070, "You're creeping toward the screen — push your chair in instead."),
     # Shoulder line rotated = leaning on one arm.
     "tilt": MetricSpec(0.06, "abs", 2.5, 12.0, "One shoulder is dropping — even out your weight."),
 }
@@ -172,26 +180,82 @@ STRETCHES = [
 ]
 
 
-def break_duration(interval_min: float) -> float:
-    """Break length scales with how long you've been sitting: a 5-minute
-    check-in only needs ~20s, a full hour (or more) earns a real ~90s+ reset.
-    """
-    slope = (90.0 - 20.0) / (60.0 - 5.0)
-    return float(max(20.0, 20.0 + (interval_min - 5.0) * slope))
+# Every guided break is a fixed 30s: 3 exercises, 10s each, drawn at random
+# from the STRETCHES catalogue.
+BREAK_DURATION_S = 30.0
+BREAK_EXERCISES_N = 3
 
 
-def pick_stretches(duration_s: float) -> List[Tuple[str, str, str, str]]:
-    """Randomised subset of STRETCHES sized to how long this break is."""
-    if duration_s < 35:
-        n = 1
-    elif duration_s < 55:
-        n = 2
-    elif duration_s < 75:
-        n = 3
-    else:
-        n = 4
-    n = min(n, len(STRETCHES))
-    return random.sample(STRETCHES, n)
+def pick_stretches() -> List[Tuple[str, str, str, str]]:
+    """Random 3-exercise subset of the STRETCHES catalogue for one break."""
+    return random.sample(STRETCHES, min(BREAK_EXERCISES_N, len(STRETCHES)))
+
+
+# ============================================================================
+# END-OF-SESSION SUGGESTION — one line, picked by where this session landed
+# on two independent axes: how much of it was slouched, and how tired the
+# fatigue engine measured you as. 5 slouch bands x 6 drowsiness bands = 30
+# standard suggestions, so the note is always specific to *this* session
+# rather than a generic "sit up straight."
+# ============================================================================
+SLOUCH_BAND_BOUNDS = [10.0, 25.0, 45.0, 70.0]      # 5 bands
+DROWSY_BAND_BOUNDS = [15.0, 30.0, 45.0, 60.0, 80.0]  # 6 bands
+
+SUGGESTIONS = [
+    [  # slouch: minimal (<10%)
+        "Textbook session — keep this exact setup and posture as your new normal.",
+        "Great posture throughout; a two-minute walk would keep your energy matching it.",
+        "Your posture was excellent — your eyes were working harder than your spine today.",
+        "Alignment was great, but your eyes were fighting fatigue — consider a short break next time.",
+        "Impressive posture despite clear drowsiness — a proper break matters more than the chair does.",
+        "Your spine held up beautifully; your eyes did not — please rest before your next session.",
+    ],
+    [  # slouch: low (10-25%)
+        "Solid session with only minor slips — you're close to a fully aligned baseline.",
+        "Good posture with a touch of drift — a quick shoulder roll would tighten it up.",
+        "Posture stayed mostly aligned, but fatigue crept in — a short walk would help both.",
+        "A few slips paired with real tiredness — your body may be asking for an earlier break.",
+        "Minor slouching but heavy fatigue — treat this as a sign to stop and rest.",
+        "Posture held up, but you were seriously fatigued — that's a stop-and-rest signal, not a stretch one.",
+    ],
+    [  # slouch: moderate (25-45%)
+        "Noticeable slouching crept in even though you were sharp — try raising your screen a notch.",
+        "Posture drifted moderately — a lumbar cushion or seat adjustment could make a real difference.",
+        "Both posture and focus drifted together — a mid-session stretch break would help either.",
+        "Moderate slouching and rising fatigue — your setup and your sleep both deserve a look.",
+        "You're slouching more as you tire — that's your body telling you it's time to stop.",
+        "Significant slouch and heavy fatigue — wrap up soon and prioritize real rest.",
+    ],
+    [  # slouch: high (45-70%)
+        "You were alert but slouched often — that's likely a setup problem, not an energy one; raise your monitor.",
+        "Frequent slouching with mild fatigue — check your chair height and screen distance today.",
+        "Posture slipped a lot and focus followed — a longer break than usual would help.",
+        "High slouch and noticeable fatigue reinforcing each other — take a proper break before continuing.",
+        "Heavy slouching and heavy fatigue — your body needs rest more than it needs another correction.",
+        "Both posture and energy were struggling hard — stop for now and come back refreshed.",
+    ],
+    [  # slouch: severe (70%+)
+        "Posture broke down often despite being alert — this session was really about your setup, not you.",
+        "Severe slouching with only mild fatigue — your chair or desk height needs a real fix.",
+        "Posture collapsed frequently as tiredness set in — consider ending sessions earlier.",
+        "Heavy slouching paired with real fatigue — this is exactly the combination that leads to strain.",
+        "Severe slouch and heavy fatigue together — please take a real break, this is a hard signal.",
+        "This was a rough session for both your spine and your energy — rest is the priority now.",
+    ],
+]
+
+
+def _band(value: float, bounds: List[float]) -> int:
+    for i, b in enumerate(bounds):
+        if value < b:
+            return i
+    return len(bounds)
+
+
+def pick_suggestion(slouch_pct: float, drowsy_pct: float) -> str:
+    si = _band(clamp(slouch_pct, 0.0, 100.0), SLOUCH_BAND_BOUNDS)
+    di = _band(clamp(drowsy_pct, 0.0, 100.0), DROWSY_BAND_BOUNDS)
+    return SUGGESTIONS[si][di]
 
 
 # ============================================================================
@@ -242,15 +306,6 @@ def _add_grid_texture(card: np.ndarray, spacing: int = 40, hex_color: str = "#7C
     card[:] = np.clip(card_f, 0, 255).astype(np.uint8)
 
 
-def _gradient_bar(card: np.ndarray, x0: int, y0: int, x1: int, y1: int, hex_stops: List[str]) -> None:
-    n = max(x1 - x0, 1)
-    stops = np.array([hex_to_bgr(hx) for hx in hex_stops], dtype=np.float32)
-    xs = np.linspace(0, 1, len(stops))
-    t = np.linspace(0, 1, n)
-    bar = np.stack([np.interp(t, xs, stops[:, c]) for c in range(3)], axis=1).astype(np.uint8)
-    card[y0:y1, x0:x1] = bar[None, :, :]
-
-
 def fmt_clock(seconds: float) -> str:
     seconds = int(max(0, seconds))
     m, s = divmod(seconds, 60)
@@ -287,6 +342,7 @@ CSS = """
   --grid: repeating-linear-gradient(0deg, rgba(124,151,170,.05) 0, rgba(124,151,170,.05) 1px, transparent 1px, transparent 40px),
           repeating-linear-gradient(90deg, rgba(124,151,170,.05) 0, rgba(124,151,170,.05) 1px, transparent 1px, transparent 40px);
 }
+html, body{ overflow-x: hidden; }
 html, body, [data-testid="stAppViewContainer"]{
   background:
     var(--grid),
@@ -297,7 +353,10 @@ html, body, [data-testid="stAppViewContainer"]{
 }
 [data-testid="stHeader"]{ background: transparent; }
 [data-testid="stToolbar"]{ right: 8px; }
-.block-container{ padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1500px; }
+/* fluid, not a fixed 1500px — a fixed cap fought the actual available width
+   whenever the sidebar opened/closed, forcing a horizontal scrollbar */
+.block-container{ padding-top: 1.4rem; padding-bottom: 3rem; max-width: min(1500px, 100%); width: 100%; }
+[data-testid="stAppViewBlockContainer"]{ overflow-x: hidden; max-width: 100%; }
 #MainMenu, footer{ visibility: hidden; }
 
 [data-testid="stSidebar"]{
@@ -468,6 +527,27 @@ html, body, [data-testid="stAppViewContainer"]{
 .stButton > button[kind="primary"]:hover{ color:var(--ink); opacity:.9; }
 div[data-testid="stMetricValue"]{ font-family:var(--mono); }
 
+/* ---------- session-vs-history comparison ---------- */
+.pr-cmp-track{ position:relative; height:20px; border-radius:3px; background:#081726; overflow:hidden; margin:6px 0; }
+.pr-cmp-track i{ display:block; height:100%; border-radius:3px; transition:width .4s ease; }
+.pr-cmp-track span{
+  position:absolute; left:8px; top:50%; transform:translateY(-50%); font-family:var(--mono);
+  font-size:.62rem; color:var(--paper); letter-spacing:.04em; text-shadow:0 1px 3px rgba(0,0,0,.7);
+}
+.pr-cmp-delta{ font-family:var(--mono); font-size:.78rem; font-weight:700; margin-top:6px; }
+.pr-ring-wrap{ display:flex; align-items:center; gap:14px; }
+.pr-ring-legend{ display:flex; flex-direction:column; gap:5px; font-family:var(--mono); font-size:.66rem; }
+.pr-ring-legend i{ display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:6px; }
+
+/* chime player: st.audio(autoplay=True) is the reliable way to replay a
+   sound on every call, but it renders a visible player bar — this app's
+   nudges are meant to be heard, not looked at, so keep the element itself
+   in the DOM (autoplay needs that) while making it visually a no-op. There's
+   no stable data-testid for this widget across Streamlit versions, so this
+   targets the <audio> tag directly instead of guessing one. */
+audio{ position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none; }
+div:has(> audio){ height:0 !important; min-height:0 !important; margin:0 !important; padding:0 !important; }
+
 /* ---------- card label + tooltip ---------- */
 .pr-label-row{ display:flex; align-items:center; gap:5px; margin-bottom:6px; }
 .pr-label-row .pr-label{ margin-bottom:0; }
@@ -600,14 +680,38 @@ def inject_css() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
 
 
+# Applied only while a session is running (see run_session): the sidebar
+# tucks itself off-screen so it doesn't compete with the live video, and
+# slides back in on hover near the left edge. Streamlit has no Python hook
+# to toggle the sidebar's collapsed state, and injected <script> tags don't
+# execute inside st.markdown HTML — so this is a pure-CSS hover reveal, not
+# a JS one, and only applies at desktop widths.
+SIDEBAR_AUTOHIDE_CSS = """
+<style>
+@media (min-width: 700px){
+  [data-testid="stSidebar"]{
+    position: fixed !important; top:0; left:0; height:100vh; z-index:999998;
+    transform: translateX(calc(-100% + 10px));
+    transition: transform .3s cubic-bezier(.4,0,.2,1);
+    box-shadow: 10px 0 30px rgba(0,0,0,.45);
+  }
+  [data-testid="stSidebar"]:hover{ transform: translateX(0); }
+  [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stSidebarCollapseButton"]{ display:none !important; }
+  [data-testid="stAppViewBlockContainer"]{ margin-left: 0 !important; max-width: 100% !important; }
+}
+</style>
+"""
+
+
 # ============================================================================
 # OFFLINE AUDIO — chimes are synthesised with NumPy at runtime.
 # No sound files to ship, nothing to download.
 # ============================================================================
 @st.cache_data(show_spinner=False)
 def make_chime(notes: Tuple[Tuple[float, float, float], ...], volume: float = 0.22,
-                decay: float = 3.2) -> str:
-    """Return a base64 WAV built from a short sequence of percussive notes.
+                decay: float = 3.2) -> bytes:
+    """Return raw WAV bytes built from a short sequence of percussive notes.
 
     Each note is (freq, start_offset_s, note_len_s) and gets its own fast
     attack + exponential decay, so a multi-note phrase reads as distinct taps
@@ -631,12 +735,13 @@ def make_chime(notes: Tuple[Tuple[float, float, float], ...], volume: float = 0.
         w.setsampwidth(2)
         w.setframerate(sr)
         w.writeframes(audio.tobytes())
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    return buf.getvalue()
 
 
-# "watch"/"bad"/"predict" are short attention-grabbing phrases meant to cut
-# through background noise without a screen glance. "break"/"recover" stay
-# closer to a single soft, positive tone since they're not urgent.
+# "watch"/"bad"/"predict"/"fatigue" are short attention-grabbing phrases meant
+# to cut through background noise without a screen glance. "break"/"recover"/
+# "start"/"end" stay closer to a single soft, positive tone since they're not
+# urgent — a session bookend, not an alert.
 CHIME_SPECS = {
     "watch": {  # falling two-note phrase — "you're drifting"
         "notes": ((659.25, 0.00, 0.16), (523.25, 0.15, 0.24)),
@@ -650,6 +755,10 @@ CHIME_SPECS = {
         "notes": ((659.25, 0.00, 0.13), (659.25, 0.16, 0.13), (783.99, 0.32, 0.26)),
         "volume": 0.28, "decay": 9.5,
     },
+    "fatigue": {  # low, slow double knock — "you're fading"
+        "notes": ((392.00, 0.00, 0.20), (349.23, 0.22, 0.32)),
+        "volume": 0.32, "decay": 8.0,
+    },
     "break": {  # bright ascending triad — "time to move"
         "notes": ((523.25, 0.00, 0.40), (659.25, 0.12, 0.40), (783.99, 0.24, 0.55)),
         "volume": 0.20, "decay": 3.2,
@@ -658,34 +767,123 @@ CHIME_SPECS = {
         "notes": ((783.99, 0.00, 0.40), (1046.50, 0.12, 0.55)),
         "volume": 0.20, "decay": 3.2,
     },
+    "start": {  # single soft rising tone — "tracking has begun"
+        "notes": ((523.25, 0.00, 0.32),),
+        "volume": 0.16, "decay": 3.4,
+    },
+    "end": {  # gentle two-note close — "session complete"
+        "notes": ((659.25, 0.00, 0.36), (523.25, 0.18, 0.46)),
+        "volume": 0.16, "decay": 3.0,
+    },
 }
 
 
-def play_chime(placeholder, kind: str, token: int) -> None:
+def play_chime(placeholder, kind: str, volume_scale: float = 1.0) -> None:
+    """Play a chime via Streamlit's native audio widget.
+
+    Earlier this hand-rolled an `<audio autoplay>` tag; browsers only honour
+    `autoplay` on first insertion, and Streamlit's own component update can
+    reuse the underlying element, so repeat alerts after the first silently
+    did nothing. st.audio(..., autoplay=True) is built for exactly this
+    replay-on-every-call case, so alerts now actually repeat.
+    """
     spec = CHIME_SPECS[kind]
-    b64 = make_chime(spec["notes"], spec["volume"], spec["decay"])
-    placeholder.markdown(
-        f'<audio autoplay="true" data-k="{kind}-{token}">'
-        f'<source src="data:audio/wav;base64,{b64}" type="audio/wav"></audio>',
-        unsafe_allow_html=True,
-    )
+    vol = spec["volume"] * clamp(volume_scale, 0.0, 1.5)
+    wav_bytes = make_chime(spec["notes"], vol, spec["decay"])
+    placeholder.audio(wav_bytes, format="audio/wav", autoplay=True)
 
 
 # ============================================================================
-# LOCAL PERSISTENCE — a single JSON file next to the script. Still offline.
+# LOCAL PERSISTENCE — a single SQLite file next to the script. No server
+# process, no account, nothing on a network — still fully offline. Replaces
+# the earlier posture_data.json file with the same on-disk locality but real
+# queries (ORDER BY / LIMIT) instead of load-mutate-truncate-rewrite.
 # ============================================================================
-def load_store() -> dict:
+def _connect() -> sqlite3.Connection:
+    return sqlite3.connect(DB_FILE, timeout=5.0)
+
+
+def init_db() -> Optional[str]:
+    """Create the schema if it doesn't exist yet. Returns an error string on
+    failure (e.g. an unwritable data directory), or None on success — callers
+    surface the error as a visible, non-fatal banner rather than crashing,
+    since posture/fatigue coaching works fine even if history can't be saved."""
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        conn = _connect()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_date TEXT,
+                daily_streak INTEGER NOT NULL DEFAULT 0,
+                best_streak INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at TEXT NOT NULL,
+                minutes REAL NOT NULL,
+                avg_score REAL NOT NULL,
+                spine_age INTEGER NOT NULL
+            )
+        """)
+        conn.execute("INSERT OR IGNORE INTO user_stats (id, last_date, daily_streak, best_streak) "
+                     "VALUES (1, NULL, 0, 0)")
+        conn.commit()
+        conn.close()
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+def load_store() -> dict:
+    """Read user stats + the most recent SESSION_HISTORY_LIMIT sessions.
+
+    The 60-entry cap is a query (ORDER BY id DESC LIMIT n), not a truncation
+    applied after appending — the sessions table is insert-only.
+    """
+    try:
+        conn = _connect()
+        row = conn.execute(
+            "SELECT last_date, daily_streak, best_streak FROM user_stats WHERE id = 1"
+        ).fetchone()
+        last_date, daily_streak, best_streak = row if row else (None, 0, 0)
+        cur = conn.execute(
+            "SELECT at, minutes, avg_score, spine_age FROM "
+            "(SELECT * FROM sessions ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
+            (SESSION_HISTORY_LIMIT,),
+        )
+        sessions = [{"at": r[0], "minutes": r[1], "avg_score": r[2], "spine_age": r[3]}
+                   for r in cur.fetchall()]
+        conn.close()
+        return {"last_date": last_date, "daily_streak": daily_streak,
+                "best_streak": best_streak, "sessions": sessions}
     except Exception:
         return {"last_date": None, "daily_streak": 0, "best_streak": 0, "sessions": []}
 
 
-def save_store(store: dict) -> None:
+def save_user_stats(store: dict) -> None:
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(store, f, indent=2)
+        conn = _connect()
+        conn.execute(
+            "UPDATE user_stats SET last_date = ?, daily_streak = ?, best_streak = ? WHERE id = 1",
+            (store.get("last_date"), store.get("daily_streak", 0), store.get("best_streak", 0)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def save_session(session: dict) -> None:
+    try:
+        conn = _connect()
+        conn.execute(
+            "INSERT INTO sessions (at, minutes, avg_score, spine_age) VALUES (?, ?, ?, ?)",
+            (session["at"], session["minutes"], session["avg_score"], session["spine_age"]),
+        )
+        conn.commit()
+        conn.close()
     except Exception:
         pass
 
@@ -847,8 +1045,12 @@ def extract_metrics(lms, w: int, h: int) -> Optional[dict]:
     return {
         "neck": float((sh_mid[1] - head[1]) / shoulder_w),
         "cva": float(clamp(cva, 0.0, 120.0)),
+        "chin": float((sh_mid[1] - nose[1]) / shoulder_w),
         "pitch": float((nose[1] - head[1]) / shoulder_w),
-        "drop": float(sh_mid[1] / h),
+        # shoulder-width normalised (not frame-height) so a real slide down
+        # the chair registers the same whether you're close to or far from
+        # the camera
+        "drop": float(sh_mid[1] / shoulder_w),
         "face": float(eye_dist / shoulder_w),
         "tilt": float(tilt),
         # geometry kept for drawing only
@@ -995,10 +1197,12 @@ class PostureEngine:
         self.baseline_jpg: Optional[str] = None
         self.current_jpg: Optional[str] = None
         self._snap_t = 0.0
+        self.hero_jpg: Optional[str] = None  # full-res frame, used as the Spine Card background
+        self._hero_t = 0.0
 
         # alerts
-        self.last_chime = {"watch": 0.0, "bad": 0.0, "predict": 0.0, "break": 0.0, "recover": 0.0}
-        self.audio_token = 0
+        self.last_chime = {"watch": 0.0, "bad": 0.0, "predict": 0.0, "fatigue": 0.0,
+                           "break": 0.0, "recover": 0.0, "start": 0.0, "end": 0.0}
         self.pending_chime: Optional[str] = None
 
     def reset_calibration(self):
@@ -1244,38 +1448,41 @@ class PostureEngine:
                 return False
             return True
         if self.next_break is not None and now >= self.next_break:
-            dur = break_duration(interval_min)
-            self.break_total = dur
-            self.break_exercises = pick_stretches(dur)
-            self.break_until = now + dur
+            self.break_total = BREAK_DURATION_S
+            self.break_exercises = pick_stretches()
+            self.break_until = now + BREAK_DURATION_S
             self._queue_chime("break", now, cooldown=0.0)
             return True
         return False
 
-    def start_break_now(self, now: float, interval_min: float):
-        dur = break_duration(interval_min)
-        self.break_total = dur
-        self.break_exercises = pick_stretches(dur)
-        self.break_until = now + dur
+    def start_break_now(self, now: float):
+        self.break_total = BREAK_DURATION_S
+        self.break_exercises = pick_stretches()
+        self.break_until = now + BREAK_DURATION_S
         self._queue_chime("break", now, cooldown=0.0)
 
     # -- alerts --------------------------------------------------------------
     def _queue_chime(self, kind: str, now: float, cooldown: float):
         if now - self.last_chime.get(kind, 0.0) >= cooldown:
             self.last_chime[kind] = now
-            self.audio_token += 1
             self.pending_chime = kind
 
     def maybe_alert(self, now: float, audio_on: bool):
         if not audio_on:
             self.pending_chime = None
             return
+        # posture nudges — short cooldowns so a sustained slump/drift keeps
+        # getting reminders instead of alerting once and going quiet
         if self.status == "BAD":
-            self._queue_chime("bad", now, cooldown=30.0)
+            self._queue_chime("bad", now, cooldown=14.0)
         elif self.status == "WATCH":
-            self._queue_chime("watch", now, cooldown=45.0)
+            self._queue_chime("watch", now, cooldown=22.0)
         elif self.predicting:
-            self._queue_chime("predict", now, cooldown=60.0)
+            self._queue_chime("predict", now, cooldown=25.0)
+        # fatigue nudge is independent of posture status, so it can fire in
+        # the same stretch as (and doesn't wait on) a posture alert
+        if self.fatigue_label in ("Drowsy", "Critical"):
+            self._queue_chime("fatigue", now, cooldown=25.0)
 
     # -- summary -------------------------------------------------------------
     def avg_score(self) -> float:
@@ -1411,12 +1618,13 @@ def to_b64_jpeg(frame_bgr, quality: int = 82) -> str:
 
 
 # ============================================================================
-# SHARE CARD — built with OpenCV so there are no font files to ship.
+# SPINE CARD — built with OpenCV so there are no font files to ship.
 # Three styles: a minimal card, a data-rich card, and a tall 9:16 story card.
+# A cropped photo from the session is the actual background, not a
+# decoration on a flat one — stats and small charts sit on the left/right
+# flanks over scrims, so the card is a real image, not a stat sheet.
 # Pure OpenCV drawing (no HTML/Pillow render step) — this keeps the card
-# generator on the same locked, offline stack as the rest of the app. Every
-# element's position is derived from a running layout cursor rather than
-# fixed coordinates, so nothing overlaps regardless of style or text length.
+# generator on the same locked, offline stack as the rest of the app.
 # ============================================================================
 STYLE_LABELS = {"minimal": "Minimal", "data": "Data-rich", "story": "Story (9:16)"}
 
@@ -1445,31 +1653,87 @@ def _share_compare(prev_sessions: list, avg: float, age: int) -> str:
     return f"Best avg score so far: {prev_best_avg:.0f}"
 
 
+def _cover_fit(img: np.ndarray, W: int, H: int) -> np.ndarray:
+    """Resize + center-crop `img` to exactly WxH, like CSS object-fit: cover.
+
+    The captured frame (960x540) is smaller than the card canvas, especially
+    for the 1080x1080/1080x1920 styles, so this is usually an *upscale* —
+    INTER_AREA (correct for shrinking) looks soft blown up; INTER_CUBIC is
+    the right choice in that direction.
+    """
+    h, w = img.shape[:2]
+    scale = max(W / w, H / h)
+    nw, nh = max(int(math.ceil(w * scale)), W), max(int(math.ceil(h * scale)), H)
+    interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
+    resized = cv2.resize(img, (nw, nh), interpolation=interp)
+    x0, y0 = (nw - W) // 2, (nh - H) // 2
+    return resized[y0:y0 + H, x0:x0 + W]
+
+
+def _scrim(card: np.ndarray, x0: int, y0: int, x1: int, y1: int, alpha: float,
+           hex_color: str = BG_0) -> None:
+    """Darken a region of `card` in place so text stays legible over a photo."""
+    x0, y0 = max(x0, 0), max(y0, 0)
+    x1, y1 = min(x1, card.shape[1]), min(y1, card.shape[0])
+    if x1 <= x0 or y1 <= y0:
+        return
+    region = card[y0:y1, x0:x1]
+    tint = np.full_like(region, hex_to_bgr(hex_color))
+    card[y0:y1, x0:x1] = cv2.addWeighted(region, 1 - alpha, tint, alpha, 0)
+
+
+def _cv_donut(card: np.ndarray, cx: int, cy: int, r: int, thickness: int,
+              segments: List[Tuple[float, str]]) -> None:
+    cv2.circle(card, (cx, cy), r, hex_to_bgr("#081726"), thickness, cv2.LINE_AA)
+    start = -90.0
+    for pct, hex_color in segments:
+        sweep = 360.0 * clamp(pct / 100.0, 0.0, 1.0)
+        if sweep > 0.6:
+            cv2.ellipse(card, (cx, cy), (r, r), 0, start, start + sweep,
+                       hex_to_bgr(hex_color), thickness, cv2.LINE_AA)
+        start += sweep
+
+
 def build_share_card(engine: PostureEngine, minutes: float, prev_sessions: list,
-                      day_streak: int, style: str = "minimal") -> bytes:
+                      day_streak: int, style: str = "minimal",
+                      hero_jpg: Optional[str] = None) -> bytes:
+    """The Spine Card: a cropped photo from the session as the base, with
+    stats and small charts on the left/right flanks rather than floating on
+    a flat background — the photo is the card, not a decoration on it."""
     age, label, note = engine.spine_age()
     avg = engine.avg_score()
     total_t = sum(engine.time_in.values()) or 1.0
+    good_pct = engine.time_in.get("GOOD", 0.0) / total_t * 100.0
+    watch_pct = engine.time_in.get("WATCH", 0.0) / total_t * 100.0
+    bad_pct = engine.time_in.get("BAD", 0.0) / total_t * 100.0
     age_color = hex_to_bgr(C_GOOD if age <= 30 else C_WATCH if age <= 46 else C_BAD)
     badge = _share_badge(engine, total_t)
     compare = _share_compare(prev_sessions, avg, age)
 
     tall = style == "story"
     W, H = 1080, (1920 if tall else 1080)
-    pad = 74
-    # "story" gets extra breathing room so the tall format doesn't feel empty;
-    # "data" packs a hero + gauge + stat grid into one square, so it needs the
-    # opposite treatment or the grid runs off the bottom edge into the footer.
-    sp = 1.5 if tall else (0.82 if style == "data" else 1.0)
+    pad = 40
 
-    card = _gradient_canvas(W, H, SURFACE_2, BG_0)
-    _add_corner_glow(card, W, H, ACCENT)
-    _add_grid_texture(card, spacing=44, hex_color=MUTED, alpha=0.045)
+    hero_bgr = None
+    if hero_jpg:
+        try:
+            arr = np.frombuffer(base64.b64decode(hero_jpg), dtype=np.uint8)
+            hero_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except Exception:
+            hero_bgr = None
+
+    if hero_bgr is not None and hero_bgr.size:
+        card = _cover_fit(hero_bgr, W, H)
+    else:
+        # graceful fallback for a session with no captured frame yet
+        card = _gradient_canvas(W, H, SURFACE_2, BG_0)
+        _add_corner_glow(card, W, H, ACCENT)
+        _add_grid_texture(card, spacing=44, hex_color=MUTED, alpha=0.045)
 
     def text_w(s, scale, thick=1, font=cv2.FONT_HERSHEY_DUPLEX):
         return cv2.getTextSize(s, font, scale, thick)[0][0]
 
-    def fit_scale(s, max_w, scale, thick=1, min_scale=0.34):
+    def fit_scale(s, max_w, scale, thick=1, min_scale=0.32):
         while scale > min_scale and text_w(s, scale, thick) > max_w:
             scale -= 0.02
         return scale
@@ -1479,83 +1743,126 @@ def build_share_card(engine: PostureEngine, minutes: float, prev_sessions: list,
             x = x - text_w(s, scale, thick, font) // 2
         cv2.putText(card, s, (int(x), int(y)), font, scale, col, thick, cv2.LINE_AA)
 
-    y = 0
-    # -- masthead --
-    y += int(96 * sp)
-    text("POSTURE:", pad, y, 1.05, hex_to_bgr(TEXT), 2)
-    y += 26
-    cv2.line(card, (pad, y), (W - pad, y), hex_to_bgr(LINE), 2)
-    y += int(74 * sp)
+    def bar_compare(x, y, w, prev_val, cur_val, max_val, better, fmt, bar_h=26, gap=10):
+        def frac(v):
+            return clamp(v / max_val, 0.04, 1.0)
+        diff = cur_val - prev_val
+        improved = (diff < 0) if better == "lower" else (diff > 0)
+        cur_color = C_GOOD if improved else ACCENT
+        cv2.rectangle(card, (x, y), (x + w, y + bar_h), hex_to_bgr("#081726"), -1)
+        cv2.rectangle(card, (x, y), (x + int(w * frac(prev_val)), y + bar_h),
+                      hex_to_bgr(MUTED), -1)
+        text(f"LAST {fmt.format(prev_val)}", x + 8, y + bar_h - 7, 0.42, hex_to_bgr(TEXT))
+        y2 = y + bar_h + gap
+        cv2.rectangle(card, (x, y2), (x + w, y2 + bar_h), hex_to_bgr("#081726"), -1)
+        cv2.rectangle(card, (x, y2), (x + int(w * frac(cur_val)), y2 + bar_h),
+                      hex_to_bgr(cur_color), -1)
+        text(f"NOW {fmt.format(cur_val)}", x + 8, y2 + bar_h - 7, 0.42, hex_to_bgr(TEXT))
+        return y2 + bar_h
 
-    # -- spine age hero --
-    text("SPINE AGE", W // 2, y, 0.82, hex_to_bgr(MUTED), 1, center=True)
-    y += int(40 * sp)
-    big = str(age)
-    big_scale, big_thick = (6.6, 11) if style == "data" else (8.4, 13)
-    (bw, bh), _ = cv2.getTextSize(big, cv2.FONT_HERSHEY_DUPLEX, big_scale, big_thick)
-    y += bh
-    cv2.putText(card, big, (W // 2 - bw // 2, y), cv2.FONT_HERSHEY_DUPLEX, big_scale,
-                age_color, big_thick, cv2.LINE_AA)
-    y += int(62 * sp)
-    text(label.upper(), W // 2, y, 1.05, hex_to_bgr(TEXT), 2, center=True)
-    y += int(40 * sp)
-    tagline = "A wear score for this session, not a literal age - lower is always better."
-    text(tagline, W // 2, y, fit_scale(tagline, W - 2 * pad, 0.6), hex_to_bgr(MUTED), 1, center=True)
-    y += int(56 * sp)
+    flank_w = int(W * 0.32)
+    top_h = 170
+    bot_h = 250 if not tall else 300
+    zone_y0, zone_y1 = top_h + 24, H - bot_h - 24
 
-    # -- best-to-worst scale with a marker for this session --
-    gx0, gx1 = pad + 10, W - pad - 10
-    _gradient_bar(card, gx0, y, gx1, y + 14, [C_GOOD, C_WATCH, C_BAD])
-    age_pct = clamp((age - 18) / (79 - 18), 0.0, 1.0)
-    mx = int(gx0 + age_pct * (gx1 - gx0))
-    tri = np.array([[mx - 11, y - 16], [mx + 11, y - 16], [mx, y - 1]], np.int32)
-    cv2.fillPoly(card, [tri], hex_to_bgr(TEXT))
-    y += 14 + 34
-    text("BEST - 18", gx0, y, 0.5, hex_to_bgr(MUTED), 1)
-    worst_label = "WORST - 79"
-    ww = text_w(worst_label, 0.5, 1)
-    text(worst_label, gx1 - ww, y, 0.5, hex_to_bgr(MUTED), 1)
-    y += int(60 * sp)
+    # -- scrims so text stays legible regardless of what's in the photo --
+    _scrim(card, 0, 0, W, top_h, 0.55)
+    _scrim(card, 0, H - bot_h, W, H, 0.62)
+    _scrim(card, 0, top_h, flank_w, H - bot_h, 0.60)
+    _scrim(card, W - flank_w, top_h, W, H - bot_h, 0.60)
 
-    # -- achievement badge + comparison vs your own history + day streak --
-    badge_scale = fit_scale(badge, W - 2 * pad - 44, 0.62, thick=2)
-    bw2 = text_w(badge, badge_scale, 2)
-    cv2.rectangle(card, (W // 2 - bw2 // 2 - 22, y - 34), (W // 2 + bw2 // 2 + 22, y + 10),
-                  hex_to_bgr(C_GOOD), 2)
-    text(badge, W // 2, y, badge_scale, hex_to_bgr(C_GOOD), 2, center=True)
-    y += int(52 * sp)
-    text(compare, W // 2, y, fit_scale(compare, W - 2 * pad, 0.62), hex_to_bgr(TEXT), 1, center=True)
-    y += int(40 * sp)
-    streak_line = f"{day_streak} day streak" if day_streak else "First day logged"
-    text(streak_line, W // 2, y, 0.56, hex_to_bgr(MUTED), 1, center=True)
-    y += int(50 * sp)
+    # -- top: brand + card name --
+    text("POSTURE:", pad, 66, 1.0, hex_to_bgr(TEXT), 2)
+    text("SPINE CARD", pad, 104, 0.5, hex_to_bgr(ACCENT), 1)
+    trust = "100% ON-DEVICE"
+    text(trust, W - pad - text_w(trust, 0.46, 1), 66, 0.46, hex_to_bgr(MUTED), 1)
 
-    # -- stat grid: skipped for "minimal", shown for "data" and "story" --
+    # -- left flank: a real pictorial, not text — the GOOD/WATCH/BAD time split --
+    lx0, lx1 = pad, flank_w - pad
+    ly = zone_y0 + 34
+    text("TIME SPLIT", lx0, ly, 0.5, hex_to_bgr(MUTED), 1)
+    ly += 26
+    ring_r = min((lx1 - lx0), 190) // 2
+    ring_cx = lx0 + ring_r
+    ring_cy = ly + ring_r
+    _cv_donut(card, ring_cx, ring_cy, ring_r, 20, [(good_pct, C_GOOD), (watch_pct, C_WATCH), (bad_pct, C_BAD)])
+    ly = ring_cy + ring_r + 34
+    for pct, hex_c, lbl in ((good_pct, C_GOOD, "ALIGNED"), (watch_pct, C_WATCH, "DRIFTING"),
+                             (bad_pct, C_BAD, "SLOUCHED")):
+        cv2.rectangle(card, (lx0, ly - 14), (lx0 + 16, ly + 2), hex_to_bgr(hex_c), -1)
+        text(f"{lbl} {pct:.0f}%", lx0 + 24, ly, 0.46, hex_to_bgr(TEXT), 1)
+        ly += 30
+
+    if tall:
+        # story has plenty of vertical room — use it for a CVA readout instead of empty space
+        ly += 20
+        text("CVA vs BASELINE", lx0, ly, 0.5, hex_to_bgr(MUTED), 1)
+        ly += 30
+        cva_now = engine.metrics_ema["cva"] if engine.metrics_ema else None
+        cva_base = engine.baseline["cva"] if engine.baseline else None
+        if cva_now is not None and cva_base is not None:
+            ly = bar_compare(lx0, ly, lx1 - lx0, cva_base, cva_now, 70.0, "higher", "{:.0f}°")
+
+    # -- right flank: bar-chart comparisons against the last session --
+    rx0, rx1 = W - flank_w + pad, W - pad
+    ry = zone_y0 + 34
+    text("AVG SCORE", rx0, ry, 0.5, hex_to_bgr(MUTED), 1)
+    ry += 26
+    prev = prev_sessions[-1] if prev_sessions else None
+    if prev:
+        ry = bar_compare(rx0, ry, rx1 - rx0, prev["avg_score"], avg, 100.0, "higher", "{:.0f}")
+    else:
+        text("First session logged", rx0, ry + 16, 0.42, hex_to_bgr(MUTED))
+        ry += 40
+    ry += 34
+    # "minimal" stops here — "data" and "story" get the extra spine-age compare
     if style != "minimal":
-        stats = [
-            ("AVG SCORE", f"{avg:.0f}"),
-            ("SESSION", fmt_clock(minutes * 60)),
-            ("BEST STREAK", fmt_clock(engine.best_streak_s)),
-            ("SAVES", str(engine.recoveries)),
-        ]
-        cols, rows = 2, 2
-        gap, cell_h = (int(22 * sp), int(150 * sp))
-        cell_w = (W - 2 * pad - gap) // cols
-        for i, (k, v) in enumerate(stats):
-            r, c = divmod(i, cols)
-            x0, y0 = pad + c * (cell_w + gap), y + r * (cell_h + gap)
-            cv2.rectangle(card, (x0, y0), (x0 + cell_w, y0 + cell_h), hex_to_bgr(SURFACE), -1)
-            cv2.rectangle(card, (x0, y0), (x0 + cell_w, y0 + cell_h), hex_to_bgr(LINE), 1)
-            text(k, x0 + cell_w // 2, y0 + 46, 0.52, hex_to_bgr(MUTED), 1, center=True)
-            text(v, x0 + cell_w // 2, y0 + int(cell_h * 0.72),
-                 fit_scale(v, cell_w - 30, 1.3), hex_to_bgr(TEXT), 2, center=True)
+        text("SPINE AGE", rx0, ry, 0.5, hex_to_bgr(MUTED), 1)
+        ry += 26
+        if prev:
+            ry = bar_compare(rx0, ry, rx1 - rx0, prev["spine_age"], age, 79.0, "lower", "{:.0f}")
+        else:
+            ry += 40
+        ry += 34
+    ry += 30
+    text(f"{day_streak}", rx0, ry + 30, 1.1, hex_to_bgr(C_GOOD), 2)
+    text("DAY STREAK", rx0, ry + 52, 0.44, hex_to_bgr(MUTED), 1)
 
-    # -- footer: trust line centered, subtle wordmark watermark in the corner --
-    foot_y = H - 60
-    text("100% on-device - nothing leaves this laptop", W // 2, foot_y, 0.54,
-         hex_to_bgr(MUTED), 1, center=True)
-    wm = "POSTURE:"
-    text(wm, W - pad - text_w(wm, 0.46, 1), H - 26, 0.46, hex_to_bgr("#3F5170"), 1)
+    # -- center: the hero number, on its own translucent backdrop --
+    cx0, cx1 = flank_w, W - flank_w
+    center_x = (cx0 + cx1) // 2
+    hero_h = 300
+    hero_y0 = (zone_y0 + zone_y1) // 2 - hero_h // 2
+    _scrim(card, cx0 + 12, hero_y0, cx1 - 12, hero_y0 + hero_h, 0.45, hex_color=SURFACE)
+    cy = hero_y0 + 70
+    text("SPINE AGE", center_x, cy, 0.6, hex_to_bgr(MUTED), 1, center=True)
+    cy += 24
+    big = str(age)
+    max_w = (cx1 - cx0) - 60
+    big_scale = fit_scale(big, max_w, 5.4, thick=9)
+    (bw, bh), _ = cv2.getTextSize(big, cv2.FONT_HERSHEY_DUPLEX, big_scale, 9)
+    cy += bh
+    cv2.putText(card, big, (center_x - bw // 2, cy), cv2.FONT_HERSHEY_DUPLEX, big_scale,
+                age_color, 9, cv2.LINE_AA)
+    cy += 40
+    text(label.upper(), center_x, cy, fit_scale(label.upper(), max_w, 0.72, thick=2),
+         hex_to_bgr(TEXT), 2, center=True)
+
+    # -- bottom band: achievement badge + comparison line + footer --
+    by = H - bot_h + 56
+    badge_scale = fit_scale(badge, W - 2 * pad - 44, 0.6, thick=2)
+    bw2 = text_w(badge, badge_scale, 2)
+    cv2.rectangle(card, (W // 2 - bw2 // 2 - 20, by - 30), (W // 2 + bw2 // 2 + 20, by + 8),
+                  hex_to_bgr(C_GOOD), 2)
+    text(badge, W // 2, by, badge_scale, hex_to_bgr(C_GOOD), 2, center=True)
+    by += 46
+    text(compare, W // 2, by, fit_scale(compare, W - 2 * pad, 0.56), hex_to_bgr(TEXT), 1, center=True)
+    by += 44
+    tagline = "A wear score for this session, not a literal age - lower is always better."
+    text(tagline, W // 2, by, fit_scale(tagline, W - 2 * pad, 0.46), hex_to_bgr(MUTED), 1, center=True)
+
+    foot_y = H - 30
+    text("PostuRe: - nothing leaves this laptop", W // 2, foot_y, 0.46, hex_to_bgr(MUTED), 1, center=True)
 
     ok, buf = cv2.imencode(".png", card)
     return buf.tobytes() if ok else b""
@@ -1622,6 +1929,101 @@ def render_gauge(pct: float, top_label: str, bottom_label: str, height: int = 84
         f'</div><div class="pr-gauge-labels" style="height:{height}px">'
         f'<span>{top_label}</span><span>{bottom_label}</span></div></div>'
     )
+
+
+def _ring_chart(segments: List[Tuple[float, str]], size: int = 128, stroke: int = 16) -> str:
+    """A stacked-arc ring chart (SVG) — e.g. time split across GOOD/WATCH/BAD."""
+    r = (size - stroke) / 2.0
+    c = 2 * math.pi * r
+    cx = cy = size / 2.0
+    parts = [f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#081726" stroke-width="{stroke}"/>']
+    offset = 0.0
+    for pct, color in segments:
+        length = c * clamp(pct / 100.0, 0.0, 1.0)
+        if length > 0.5:
+            parts.append(
+                f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="{stroke}" '
+                f'stroke-dasharray="{length:.1f} {max(c - length, 0.1):.1f}" '
+                f'stroke-dashoffset="{-offset:.1f}" transform="rotate(-90 {cx} {cy})"/>'
+            )
+        offset += length
+    return f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">' + "".join(parts) + "</svg>"
+
+
+def _cmp_bar_card(label: str, prev_val: float, cur_val: float, max_val: float,
+                   better: str, fmt: str = "{:.0f}") -> str:
+    """A two-bar 'last session vs this session' comparison card."""
+    prev_pct = clamp(prev_val / max_val * 100.0, 2.0, 100.0)
+    cur_pct = clamp(cur_val / max_val * 100.0, 2.0, 100.0)
+    diff = cur_val - prev_val
+    improved = diff < 0 if better == "lower" else diff > 0
+    delta_color = C_GOOD if improved else (MUTED if abs(diff) < 1e-6 else C_WATCH)
+    sign = "+" if diff > 0 else ""
+    delta_txt = "No change vs last session" if abs(diff) < 0.5 else f"{sign}{diff:.0f} vs last session"
+    cur_color = C_GOOD if improved else ACCENT
+    return (
+        f'<div class="pr-card">'
+        f'<div class="pr-label-row"><div class="pr-label">{label}</div></div>'
+        f'<div class="pr-cmp-track"><i style="width:{prev_pct:.0f}%;background:{MUTED}"></i>'
+        f'<span>Last {fmt.format(prev_val)}</span></div>'
+        f'<div class="pr-cmp-track"><i style="width:{cur_pct:.0f}%;background:{cur_color}"></i>'
+        f'<span>Now {fmt.format(cur_val)}</span></div>'
+        f'<div class="pr-cmp-delta" style="color:{delta_color}">{delta_txt}</div>'
+        f'</div>'
+    )
+
+
+def render_comparison(s: dict) -> None:
+    """Pictorial comparison of this session against your own history —
+    a ring chart of how the time split, and bar comparisons against your
+    most recent previous session, in place of a wall of numbers."""
+    st.markdown('<div class="pr-label" style="margin:26px 0 8px">THIS SESSION VS YOUR HISTORY</div>',
+                unsafe_allow_html=True)
+    total = sum(s["time_in"].values()) or 1.0
+    good_pct = s["time_in"]["GOOD"] / total * 100.0
+    watch_pct = s["time_in"]["WATCH"] / total * 100.0
+    bad_pct = s["time_in"]["BAD"] / total * 100.0
+    ring = _ring_chart([(good_pct, C_GOOD), (watch_pct, C_WATCH), (bad_pct, C_BAD)])
+    ring_card = (
+        '<div class="pr-card"><div class="pr-label-row"><div class="pr-label">TIME SPLIT</div></div>'
+        f'<div class="pr-ring-wrap">{ring}<div class="pr-ring-legend">'
+        f'<span><i style="background:{C_GOOD}"></i>Aligned {good_pct:.0f}%</span>'
+        f'<span><i style="background:{C_WATCH}"></i>Drifting {watch_pct:.0f}%</span>'
+        f'<span><i style="background:{C_BAD}"></i>Slouched {bad_pct:.0f}%</span>'
+        '</div></div></div>'
+    )
+
+    prev_list = s.get("prev_sessions", [])
+    if prev_list:
+        prev = prev_list[-1]
+        avg_card = _cmp_bar_card("AVG SCORE", prev["avg_score"], s["avg"], 100.0, "higher")
+        age_card = _cmp_bar_card("SPINE AGE", prev["spine_age"], s["age"], 79.0, "lower", fmt="{:.0f}")
+    else:
+        placeholder = ('<div class="pr-card"><div class="pr-label-row">'
+                       '<div class="pr-label">FIRST SESSION</div></div>'
+                       '<div class="pr-sub">Finish a few more sessions and comparisons '
+                       'will show up here.</div></div>')
+        avg_card = age_card = placeholder
+
+    st.markdown(f'<div class="pr-grid" style="grid-template-columns:repeat(3,1fr)">'
+               f'{ring_card}{avg_card}{age_card}</div>', unsafe_allow_html=True)
+
+    hist = prev_list[-7:] + [{"avg_score": s["avg"]}]
+    if len(hist) >= 2:
+        W, H = 600.0, 70.0
+        n = len(hist)
+        pts = [f"{i/(n-1)*W:.1f},{H - clamp(sess['avg_score'],0,100)/100.0*H:.1f}"
+              for i, sess in enumerate(hist)]
+        lx, ly = pts[-1].split(",")
+        svg = (
+            f'<div class="pr-strip" style="margin-top:14px"><svg viewBox="0 0 {W:.0f} {H:.0f}" '
+            f'preserveAspectRatio="none"><polyline points="{" ".join(pts)}" fill="none" '
+            f'stroke="{ACCENT}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" '
+            f'vector-effect="non-scaling-stroke"/><circle cx="{lx}" cy="{ly}" r="4" fill="{ACCENT}"/></svg>'
+            f'<div class="pr-legend"><span>Last {n} session{"s" if n>1 else ""}</span>'
+            f'<span>Avg score trend</span></div></div>'
+        )
+        st.markdown(svg, unsafe_allow_html=True)
 
 
 def _card(label, value, unit, sub, color, bar=None, wide=False, tip=None, extra=""):
@@ -1936,9 +2338,14 @@ def init_state():
     ss.setdefault("summary", None)
     ss.setdefault("cap", None)
     ss.setdefault("cap_index", None)
+    if "db_error" not in ss:
+        ss.db_error = init_db()
     ss.setdefault("store", load_store())
     ss.setdefault("share_pngs", {})
     ss.setdefault("share_style", "minimal")
+    ss.setdefault("end_chime_played", False)
+    ss.setdefault("audio_volume", 70)
+    ss.setdefault("audio_on", True)
 
 
 def start_session():
@@ -1958,16 +2365,19 @@ def stop_session():
         dur = time.time() - e.session_start
         age, label, note = e.spine_age()
         prev_sessions = list(ss.store.get("sessions", []))  # history *before* this session is added
+        total_t = sum(e.time_in.values()) or 1.0
+        slouch_pct = e.time_in["BAD"] / total_t * 100.0
+        drowsy_pct = (e.fatigue_sum / e.fatigue_n) if e.fatigue_n else 0.0
         if dur >= 60:
             ss.store = register_day(ss.store)
-            ss.store.setdefault("sessions", []).append({
+            save_user_stats(ss.store)
+            save_session({
                 "at": datetime.now().isoformat(timespec="seconds"),
                 "minutes": round(dur / 60, 1),
                 "avg_score": round(e.avg_score(), 1),
                 "spine_age": age,
             })
-            ss.store["sessions"] = ss.store["sessions"][-60:]
-            save_store(ss.store)
+            ss.store = load_store()  # re-read so ss.store reflects the LIMIT-60 query, not a local append
         ss.summary = {
             "duration": dur,
             "avg": e.avg_score(),
@@ -1983,9 +2393,14 @@ def stop_session():
             "breaks": e.breaks_taken,
             "baseline_jpg": e.baseline_jpg,
             "current_jpg": e.current_jpg,
+            "hero_jpg": e.hero_jpg,
             "prev_sessions": prev_sessions,
             "day_streak": ss.store.get("daily_streak", 0),
+            "slouch_pct": slouch_pct,
+            "drowsy_pct": drowsy_pct,
+            "suggestion": pick_suggestion(slouch_pct, drowsy_pct),
         }
+        ss.end_chime_played = False
     release_camera()
 
 
@@ -1997,8 +2412,7 @@ def sidebar() -> dict:
     ss = st.session_state
     sb = st.sidebar
     sb.markdown(
-        f'<div style="font-family:ui-monospace,monospace;font-size:1.5rem;font-weight:700;'
-        f'letter-spacing:-.03em;color:{TEXT}">POSTU<span style="color:{ACCENT}">Re:</span></div>'
+        f'<div class="pr-wordmark" style="font-size:1.5rem">Postu<span>Re:</span></div>'
         f'<div style="font-family:ui-monospace,monospace;font-size:.6rem;letter-spacing:.22em;'
         f'color:{MUTED};margin:4px 0 14px">SPINE TELEMETRY · OFFLINE</div>',
         unsafe_allow_html=True,
@@ -2020,6 +2434,8 @@ def sidebar() -> dict:
     sb.markdown("**Feedback**")
     ambient = sb.checkbox("Ambient screen glow", True)
     audio = sb.checkbox("Audio nudges", True)
+    audio_volume = sb.slider("Nudge volume", 0, 100, 70, 5, disabled=not audio)
+    ss.audio_on = audio
     fatigue = sb.checkbox("Fatigue engine (eyes + yawns)", True)
 
     sb.markdown("**Overlay**")
@@ -2043,14 +2459,16 @@ def sidebar() -> dict:
         f'{len(store.get("sessions",[]))} sessions logged locally</div>',
         unsafe_allow_html=True,
     )
+    ss.audio_volume = audio_volume  # available outside cfg for the session-end chime
     return dict(sensitivity=sensitivity, break_min=break_min, ambient=ambient, audio=audio,
-                fatigue=fatigue, skeleton=skeleton, show_angle=show_angle, snapshot=snapshot,
-                cam_index=int(cam_index), complexity=int(complexity), face_every=int(face_every))
+                audio_volume=audio_volume, fatigue=fatigue, skeleton=skeleton,
+                show_angle=show_angle, snapshot=snapshot, cam_index=int(cam_index),
+                complexity=int(complexity), face_every=int(face_every))
 
 
 def masthead():
     st.markdown(
-        '<div class="pr-mast"><p class="pr-wordmark">PostuRe<span>:</span></p>'
+        '<div class="pr-mast"><p class="pr-wordmark">Postu<span>Re:</span></p>'
         '<div class="pr-tag">Craniovertebral tracking · Fatigue detection · 100% on-device</div></div>'
         '<div class="pr-rule"></div>',
         unsafe_allow_html=True,
@@ -2063,6 +2481,8 @@ def masthead():
 def run_session(cfg: dict):
     ss = st.session_state
     e: PostureEngine = ss.engine
+
+    st.markdown(SIDEBAR_AUTOHIDE_CSS, unsafe_allow_html=True)
 
     cap = get_camera(cfg["cam_index"])
     if cap is None or not cap.isOpened():
@@ -2160,6 +2580,8 @@ def run_session(cfg: dict):
                         e.baseline_jpg = to_b64_jpeg(
                             cv2.resize(snap, (460, int(h * 460 / w))), 78)
                         e.schedule_breaks(now, cfg["break_min"])
+                        if cfg["audio"]:
+                            e._queue_chime("start", now, cooldown=0.0)
                     else:
                         cal_fail_msg = "Couldn't see your shoulders clearly - restarting calibration."
                         e.reset_calibration()
@@ -2226,8 +2648,12 @@ def run_session(cfg: dict):
                 e.current_jpg = to_b64_jpeg(cv2.resize(disp, (460, int(h * 460 / w))), 78)
                 render_snapshot(snap_ph, e)
 
+            if e.calibrated and now - e._hero_t > 1.5:
+                e._hero_t = now
+                e.hero_jpg = to_b64_jpeg(disp, 88)  # full-res frame for the Spine Card background
+
             if e.pending_chime:
-                play_chime(audio_ph, e.pending_chime, e.audio_token)
+                play_chime(audio_ph, e.pending_chime, cfg["audio_volume"] / 100.0)
                 e.pending_chime = None
 
             frame_i += 1
@@ -2279,6 +2705,11 @@ def render_idle():
 
 def render_summary(s: dict):
     ss = st.session_state
+    if not ss.get("end_chime_played", False):
+        if ss.get("audio_on", True):
+            play_chime(st.empty(), "end", ss.get("audio_volume", 70) / 100.0)
+        ss.end_chime_played = True
+
     age_color = C_GOOD if s["age"] <= 30 else C_WATCH if s["age"] <= 46 else C_BAD
     # gauge fills upward for a *better* (lower) age — best sits at the top
     age_pct = 1.0 - clamp((s["age"] - 18) / (79 - 18), 0.0, 1.0)
@@ -2298,6 +2729,14 @@ def render_summary(s: dict):
     )
     st.markdown('<div style="height:18px"></div>', unsafe_allow_html=True)
 
+    suggestion = s.get("suggestion") or pick_suggestion(s.get("slouch_pct", 0.0), s.get("drowsy_pct", 0.0))
+    st.markdown(
+        f'<div class="pr-banner" style="background:{hex_to_rgba(ACCENT,0.08)};border-color:{hex_to_rgba(ACCENT,0.35)}">'
+        f'<span class="k" style="background:{hex_to_rgba(ACCENT,0.16)};color:{ACCENT}">FOR NEXT TIME</span>'
+        f'<span style="color:{TEXT}">{suggestion}</span></div>',
+        unsafe_allow_html=True,
+    )
+
     total = sum(s["time_in"].values()) or 1.0
     cards = '<div class="pr-grid" style="grid-template-columns:repeat(4,1fr)">'
     cards += _card("Session", fmt_clock(s["duration"]), "", f"{s['breaks']} stretch breaks", ACCENT)
@@ -2315,6 +2754,8 @@ def render_summary(s: dict):
     cards += "</div>"
     st.markdown(cards, unsafe_allow_html=True)
 
+    render_comparison(s)
+
     if s.get("baseline_jpg") and s.get("current_jpg"):
         st.markdown('<div class="pr-label" style="margin:22px 0 8px">'
                     'HOW YOU STARTED VS HOW YOU FINISHED</div>', unsafe_allow_html=True)
@@ -2327,8 +2768,8 @@ def render_summary(s: dict):
             unsafe_allow_html=True,
         )
 
-    st.markdown('<div class="pr-label" style="margin:26px 0 8px">SHARE CARD</div>', unsafe_allow_html=True)
-    style = st.radio("Share card style", list(STYLE_LABELS.keys()),
+    st.markdown('<div class="pr-label" style="margin:26px 0 8px">SPINE CARD</div>', unsafe_allow_html=True)
+    style = st.radio("Spine Card style", list(STYLE_LABELS.keys()),
                      format_func=lambda k: STYLE_LABELS[k], horizontal=True,
                      key="share_style", label_visibility="collapsed")
 
@@ -2337,6 +2778,7 @@ def render_summary(s: dict):
             ss.share_pngs[style] = build_share_card(
                 ss.engine, s["duration"] / 60.0,
                 s.get("prev_sessions", []), s.get("day_streak", 0), style,
+                hero_jpg=s.get("hero_jpg") or s.get("current_jpg"),
             )
         except Exception:
             ss.share_pngs[style] = b""
@@ -2345,11 +2787,11 @@ def render_summary(s: dict):
     c1, c2 = st.columns([1, 1])
     with c1:
         if png:
-            st.image(png, width=260 if style == "story" else 340)
-            st.download_button("Download share card", png,
-                               file_name=f"posture-spine-age-{s['age']}-{style}.png", mime="image/png")
+            st.image(png, width=300 if style == "story" else 420)
+            st.download_button("Download Spine Card", png,
+                               file_name=f"spine-card-{s['age']}-{style}.png", mime="image/png")
         else:
-            st.info("Couldn't render the share card for this session.")
+            st.info("Couldn't render the Spine Card for this session.")
     with c2:
         st.button("Start another session", type="primary", on_click=start_session)
 
@@ -2375,6 +2817,13 @@ def main():
     init_state()
     cfg = sidebar()
     masthead()
+
+    if st.session_state.get("db_error"):
+        st.warning(
+            f"Local session history isn't saving right now ({st.session_state.db_error}). "
+            "Posture and fatigue coaching still work normally — nothing is lost except this "
+            "run's entry in your streak/history."
+        )
 
     if st.session_state.running:
         run_session(cfg)

@@ -21,6 +21,13 @@ Project rules for working in this repo. These are constraints, not suggestions �
 - Don't add features, abstractions, or "nice to have" polish beyond what's asked — every added surface is something that can break on stage.
 - When in doubt between a clever fix and a boring, predictable one, take the boring one.
 
+## Two apps in this repo
+
+- `posture_app.py` (repo root) is the original Streamlit demo. Everything above ("Stack is locked") governs this app.
+- `desktop/` is a separate, sanctioned Electron rewrite: an Electron shell (`desktop/electron/`) driving a React frontend (`desktop/frontend/`), talking to a local Python FastAPI + WebSocket sidecar (`desktop/backend/server.py`) that Electron spawns on launch and binds to `127.0.0.1:8765` only — never exposed to the network. The backend logic (engine, metrics, geometry, drawing, audio, stretches, share cards) is ported from `posture_app.py`.
+- The "no different UI framework" rule under Stack is locked does not apply inside `desktop/` — Electron + React there is intentional, not a shortcut. The offline/on-device rule (no cloud calls, no external network requests) still applies fully to `desktop/`; its local FastAPI server is a same-machine sidecar, not a network service.
+- When a task says "the app" without naming one, ask or infer from context (sidebar/`st.*` calls → Streamlit; Electron/React/frontend calls → `desktop/`) rather than guessing.
+
 ## Team
 
 - Vatsal — ECE. Owns the sensing layer: calibration, metric extraction, scoring, thresholds.

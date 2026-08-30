@@ -1,0 +1,10 @@
+# PostuRe desktop backend — same pinned CV/ML core as the Streamlit app,
+# no streamlit itself, plus a lightweight local server for the Electron
+# frontend to talk to.
+mediapipe==0.10.14
+opencv-python==4.10.0.84
+numpy==1.26.4
+protobuf==4.25.3
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+websockets==13.1

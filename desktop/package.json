@@ -1,0 +1,39 @@
+{
+  "name": "posture-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PostuRe: — native desktop app (Electron shell + local Python engine)",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:electron": "wait-on tcp:5173 && electron .",
+    "dev": "concurrently -k \"npm:dev:frontend\" \"npm:dev:electron\"",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "cd backend && bash build_pyinstaller.sh",
+    "dist:mac": "npm run build:frontend && npm run build:backend && electron-builder --mac"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.4",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8",
+    "wait-on": "^8.0.5"
+  },
+  "build": {
+    "appId": "com.posture.desktop",
+    "productName": "PostuRe",
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist/posture-backend",
+        "to": "backend/posture-backend"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.healthcare-fitness",
+      "target": "dmg"
+    }
+  }
+}
